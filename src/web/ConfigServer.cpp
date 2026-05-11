@@ -11,7 +11,7 @@
 static const char CONFIG_CSS[] PROGMEM = R"css(
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:sans-serif;background:#1a1a2e;color:#eee;padding:16px}
-.wrap{max-width:520px;margin:0 auto}
+.wrap{max-width:960px;margin:0 auto}
 h1{color:#e94560;margin-bottom:4px;font-size:1.4rem}
 nav{display:flex;gap:8px;margin:16px 0;flex-wrap:wrap}
 nav a{padding:8px 16px;background:#16213e;border-radius:8px;color:#aaa;text-decoration:none;font-size:.85rem;transition:all .2s}
@@ -31,9 +31,23 @@ button.sec{background:#0f3460;border:1px solid #555;color:#aaa}
 #toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:10px;background:#4caf50;color:#fff;font-size:.9rem;opacity:0;transition:opacity .3s;pointer-events:none}
 #toast.show{opacity:1}
 .periph-list{margin-top:12px}
-.periph-item{display:flex;gap:8px;align-items:center;margin-bottom:8px;background:#0f3460;border-radius:8px;padding:8px 12px}
-.periph-item select,.periph-item input{flex:1;margin:0}
-.periph-item button{margin:0;padding:6px 12px;background:#3b1a1a;font-size:.8rem}
+.periph-item{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;background:#0f3460;border-radius:8px;padding:8px 12px}
+.periph-item select{flex:1;min-width:110px;margin:0}
+.periph-item input{flex:1;margin:0}
+.periph-item button{margin:0;padding:6px 12px;background:#3b1a1a;font-size:.8rem;flex-shrink:0}
+.rule-item{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px;background:#0f3460;border-radius:8px;padding:10px 12px}
+.rule-item select{flex:1;min-width:120px;margin:0}
+.rule-item input[type=number]{width:82px;flex:0 0 82px;margin:0}
+.rule-item button{margin:0;padding:6px 12px;background:#3b1a1a;font-size:.8rem;flex-shrink:0}
+.rlbl{font-size:.72rem;color:#aaa;white-space:nowrap;flex-shrink:0;background:#1a1a3e;padding:3px 7px;border-radius:5px}
+.rarrow{color:#e94560;font-size:1.1rem;flex-shrink:0;padding:0 2px}
+@media(max-width:600px){
+  .wrap{padding:0}
+  body{padding:10px}
+  .card{padding:16px;border-radius:10px}
+  nav a{padding:7px 12px;font-size:.8rem}
+  .rule-item select{min-width:100px}
+}
 )css";
 
 static const char CONFIG_JS[] PROGMEM = R"js(
@@ -268,20 +282,22 @@ void ConfigServer::_handleGpio() {
         "const l=document.getElementById('rlist');l.innerHTML='';"
         "if(!rules.length){l.innerHTML='<p style=\"color:#666;font-size:.85rem\">Нет правил</p>';return;}"
         "rules.forEach((r,i)=>{"
-        "const d=document.createElement('div');d.className='periph-item';"
+        "const d=document.createElement('div');d.className='rule-item';"
         "const pmsVis=r.action==='pulse'?'':'display:none';"
         "d.innerHTML="
-        "`<select onchange='rules[${i}].trigger=this.value'>${periphOpts(r.trigger)}</select>`"
-        "+`<select onchange='rules[${i}].event=this.value' style='max-width:110px'>`"
+        "`<span class='rlbl'>ЕСЛИ</span>`"
+        "+`<select onchange='rules[${i}].trigger=this.value'>${periphOpts(r.trigger)}</select>`"
+        "+`<select onchange='rules[${i}].event=this.value'>`"
         "+EVENTS.map(e=>`<option value='${e.v}'${r.event===e.v?' selected':''}>${e.l}</option>`).join('')"
         "+`</select>`"
-        "+`<span style='color:#e94560;padding:0 2px'>&#x2192;</span>`"
-        "+`<select onchange='onActChange(${i},this.value)' style='max-width:110px'>`"
+        "+`<span class='rarrow'>&#x2794;</span>`"
+        "+`<span class='rlbl'>ТО</span>`"
+        "+`<select onchange='onActChange(${i},this.value)'>`"
         "+ACTIONS.map(a=>`<option value='${a.v}'${r.action===a.v?' selected':''}>${a.l}</option>`).join('')"
         "+`</select>`"
         "+`<input id='pms${i}' type='number' min='100' max='60000' step='100'`"
         "+` value='${r.pulseMs||500}' onchange='rules[${i}].pulseMs=+this.value'`"
-        "+` style='max-width:72px;${pmsVis}' placeholder='мс' title='Длительность импульса, мс'>`"
+        "+` style='${pmsVis}' placeholder='мс' title='Длительность импульса, мс'>`"
         "+`<select onchange='rules[${i}].target=this.value'>${periphOpts(r.target)}</select>`"
         "+`<button onclick='rules.splice(${i},1);renderRules()'>&#x2715;</button>`;"
         "l.appendChild(d);});}"
