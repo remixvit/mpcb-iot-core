@@ -325,10 +325,9 @@ void ConfigServer::_handleLogs() {
         "<script>"
         "function loadLogs(){"
         "fetch('/api/log-text').then(r=>r.text()).then(t=>{"
-        "document.getElementById('log').textContent=t||'-- пусто --';"
-        "});"
-        "fetch('/api/status').then(r=>r.json()).then(d=>{"
-        "// refresh done"
+        "const el=document.getElementById('log');"
+        "el.textContent=t.trim()||'-- пусто --';"
+        "el.scrollTop=el.scrollHeight;"
         "});}"
         "function clearLogs(){"
         "fetch('/api/logs/clear',{method:'POST'}).then(()=>{"
@@ -336,7 +335,7 @@ void ConfigServer::_handleLogs() {
         "document.getElementById('cnt').textContent='0';"
         "});}"
         "loadLogs();"
-        "setInterval(loadLogs,5000);"  // auto-refresh every 5s
+        "setInterval(loadLogs,5000);"
         "</script>";
 
     _server.send(200, "text/html", _page("Логи", "logs", body));
