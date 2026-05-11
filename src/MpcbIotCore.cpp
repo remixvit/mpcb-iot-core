@@ -9,6 +9,7 @@
 void MpcbIotCore::begin(const String& deviceName) {
     _storage.begin();
 
+    WiFi.mode(WIFI_STA);  // needed before macAddress() returns valid data
     uint8_t mac[6];
     WiFi.macAddress(mac);
     char suffix[5];
