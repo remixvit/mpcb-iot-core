@@ -26,10 +26,11 @@ static constexpr uint8_t MAX_RULES       = 20;
 // action:  "on" | "off" | "toggle"
 // target:  sanitized key of a relay/pwm peripheral
 struct Rule {
-    String triggerKey;
-    String event;
-    String targetKey;
-    String action;
+    String   triggerKey;
+    String   event;
+    String   targetKey;
+    String   action;
+    uint32_t pulseMs = 500;  // used when action == "pulse"
 };
 
 struct Peripheral {
@@ -47,6 +48,7 @@ struct Peripheral {
     float    floatState2 = 0.0f;  // second sensor value (humidity)
     bool     prevBool    = false; // for edge detection (button)
     uint32_t lastReadMs  = 0;
+    uint32_t pulseEndMs  = 0;    // nonzero = pulse active, auto-off at this millis()
     bool     initialized = false;
 };
 
@@ -70,7 +72,7 @@ private:
     void _applyCommand(Peripheral& p, const String& payload);
     void _publishState(const Peripheral& p);
     void _checkRules(const String& triggerKey, const String& event);
-    void _applyAction(Peripheral& p, const String& action);
+    void _applyAction(Peripheral& p, const String& action, uint32_t pulseMs = 0);
 
     static String _sanitize(const String& s);
 

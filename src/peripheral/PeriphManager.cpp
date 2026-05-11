@@ -62,6 +62,7 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
             r.event      = obj["event"].as<String>();
             r.targetKey  = obj["target"].as<String>();
             r.action     = obj["action"].as<String>();
+            r.pulseMs    = obj["pulseMs"] | 500;
             if (r.triggerKey.isEmpty() || r.targetKey.isEmpty()) continue;
             Log.log("Rules", r.triggerKey + " " + r.event + " → " + r.action + " " + r.targetKey);
             _rulesCount++;
@@ -144,6 +145,15 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             _checkRules(p.key, "any");
         }
 
+    } else if (p.type == "relay") {
+        if (p.pulseEndMs > 0 && now >= p.pulseEndMs) {
+            p.pulseEndMs = 0;
+            p.boolState  = false;
+            digitalWrite(p.pin, LOW);
+            _publishState(p);
+            Log.log("Rules", p.key + " pulse end → OFF");
+        }
+
     } else if (p.type == "analog") {
         if (now - p.lastReadMs >= 10000) {
             p.lastReadMs  = now;
@@ -153,7 +163,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             _publishState(p);
         }
     }
-    // relay / pwm / neopixel: event-driven only, nothing to poll
+    // pwm / neopixel: event-driven only, nothing to poll
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -208,19 +218,27 @@ void PeriphManager::_checkRules(const String& triggerKey, const String& event) {
         if (r.event != event) continue;
         for (uint8_t j = 0; j < _count; j++) {
             if (_list[j].key == r.targetKey && _list[j].initialized) {
-                _applyAction(_list[j], r.action);
+                _applyAction(_list[j], r.action, r.pulseMs);
                 break;
             }
         }
     }
 }
 
-void PeriphManager::_applyAction(Peripheral& p, const String& action) {
+void PeriphManager::_applyAction(Peripheral& p, const String& action, uint32_t pulseMs) {
     if (p.type == "relay") {
         if (action == "on")          p.boolState = true;
         else if (action == "off")    p.boolState = false;
         else if (action == "toggle") p.boolState = !p.boolState;
-        else return;
+        else if (action == "pulse") {
+            p.boolState  = true;
+            p.pulseEndMs = millis() + (pulseMs > 0 ? pulseMs : 500);
+            digitalWrite(p.pin, HIGH);
+            _publishState(p);
+            Log.log("Rules", p.key + " pulse ON for " + String(pulseMs) + "ms");
+            return;
+        } else return;
+        p.pulseEndMs = 0;  // cancel any active pulse if explicit on/off/toggle
         digitalWrite(p.pin, p.boolState ? HIGH : LOW);
         _publishState(p);
         Log.log("Rules", p.key + " relay " + action + " → " + (p.boolState ? "ON" : "OFF"));

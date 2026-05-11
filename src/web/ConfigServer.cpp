@@ -248,7 +248,8 @@ void ConfigServer::_handleGpio() {
 
         // rules
         "const EVENTS=[{v:'pressed',l:'нажата'},{v:'released',l:'отпущена'},{v:'any',l:'любое'}];"
-        "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'},{v:'off',l:'выключить'}];"
+        "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'}"
+        ",{v:'off',l:'выключить'},{v:'pulse',l:'импульс'}];"
         "let rules=" + rulesJson + ";"
 
         "function periphOpts(sel){"
@@ -257,27 +258,37 @@ void ConfigServer::_handleGpio() {
         "const l=it.label||it.type+'_'+it.pin;"
         "return`<option value='${k}'${k===sel?' selected':''}>${l}</option>`;}).join('');}"
 
+        // helper called by onchange on the action select
+        "function onActChange(i,v){"
+        "rules[i].action=v;"
+        "var p=document.getElementById('pms'+i);"
+        "if(p)p.style.display=v==='pulse'?'':'none';}"
+
         "function renderRules(){"
         "const l=document.getElementById('rlist');l.innerHTML='';"
         "if(!rules.length){l.innerHTML='<p style=\"color:#666;font-size:.85rem\">Нет правил</p>';return;}"
         "rules.forEach((r,i)=>{"
         "const d=document.createElement('div');d.className='periph-item';"
+        "const pmsVis=r.action==='pulse'?'':'display:none';"
         "d.innerHTML="
         "`<select onchange='rules[${i}].trigger=this.value'>${periphOpts(r.trigger)}</select>`"
         "+`<select onchange='rules[${i}].event=this.value' style='max-width:110px'>`"
         "+EVENTS.map(e=>`<option value='${e.v}'${r.event===e.v?' selected':''}>${e.l}</option>`).join('')"
         "+`</select>`"
         "+`<span style='color:#e94560;padding:0 2px'>&#x2192;</span>`"
-        "+`<select onchange='rules[${i}].action=this.value' style='max-width:120px'>`"
+        "+`<select onchange='onActChange(${i},this.value)' style='max-width:110px'>`"
         "+ACTIONS.map(a=>`<option value='${a.v}'${r.action===a.v?' selected':''}>${a.l}</option>`).join('')"
         "+`</select>`"
+        "+`<input id='pms${i}' type='number' min='100' max='60000' step='100'`"
+        "+` value='${r.pulseMs||500}' onchange='rules[${i}].pulseMs=+this.value'`"
+        "+` style='max-width:72px;${pmsVis}' placeholder='мс' title='Длительность импульса, мс'>`"
         "+`<select onchange='rules[${i}].target=this.value'>${periphOpts(r.target)}</select>`"
         "+`<button onclick='rules.splice(${i},1);renderRules()'>&#x2715;</button>`;"
         "l.appendChild(d);});}"
 
         "function addRule(){"
         "const k=items.length?san(items[0].label)||items[0].type+'_'+items[0].pin:'';"
-        "rules.push({trigger:k,event:'pressed',action:'toggle',target:k});"
+        "rules.push({trigger:k,event:'pressed',action:'toggle',target:k,pulseMs:500});"
         "renderRules();}"
 
         "function saveRules(){post('/api/rules',{rules:rules},d=>toast(d.ok?'Сохранено':'Ошибка',d.ok));}"
