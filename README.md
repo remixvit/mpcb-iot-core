@@ -1,29 +1,35 @@
 # mpcb-iot-core
 
-ESP32 IoT starter library — WiFi provisioning, MQTT, web configurator and GPIO constructor.
+ESP32 IoT библиотека — WiFi provisioning, MQTT (mpcbstudio protocol), BLE config, web configurator, GPIO constructor с automation rules.
 
-## What it does
+## Что делает
 
-1. **No WiFi saved** → starts AP `mpcb-XXXX`, captive portal for network selection
-2. **WiFi connected** → web config server at `http://<device-ip>`
-3. **All configured** → connects to MQTT, fires your callbacks
+1. **Нет WiFi** → AP `mpcb-XXXX`, captive portal для выбора сети
+2. **WiFi есть** → веб-сервер `http://<ip>`, подключение к MQTT
+3. **MQTT подключён** → состояние `RUNNING`, запускает колбэки, управляет GPIO
 
-## Quick start
+## Быстрый старт
 
 ```cpp
 #include <MpcbIotCore.h>
 
-MpcbIotCore iot;
+MpcbIotCore   iot;
+PeriphManager pm;
 
 void setup() {
-    Serial.begin(115200);
-
     iot.onStateChange([](IotState s) {
-        // e.g. update LED indicator
+        if (s == IotState::RUNNING) {
+            String deviceId = iot.storage().loadDevice().deviceId;
+            pm.begin(deviceId, iot.storage(), iot);
+        }
+    });
+
+    iot.onMqttConnected([]() {
+        pm.onMqttConnected();  // subscribe +/set, publish config + states
     });
 
     iot.onMqttMessage([](const String& topic, const String& payload) {
-        Serial.println(topic + " → " + payload);
+        pm.handleMessage(topic, payload);
     });
 
     iot.begin("My Device");
@@ -31,47 +37,111 @@ void setup() {
 
 void loop() {
     iot.loop();
+    pm.loop();
 }
 ```
 
-## Web interface
+## Веб-интерфейс
 
-| URL | Description |
-|-----|-------------|
-| `/` | Device name, status |
-| `/wifi` | Change WiFi network |
-| `/mqtt` | MQTT broker settings |
-| `/gpio` | GPIO peripheral constructor |
+| URL | Описание |
+|-----|----------|
+| `/` | Имя устройства, статус |
+| `/wifi` | Смена WiFi сети |
+| `/mqtt` | Настройки MQTT брокера |
+| `/gpio` | GPIO конструктор + сценарии |
+| `/logs` | Лог устройства (кольцевой буфер) |
+| `/ota` | OTA обновление прошивки |
+| `/api/log-text` | Лог в виде plain text |
+| `/api/status` | JSON статус |
 
-## GPIO constructor
+## GPIO конструктор
 
-Assign peripherals to pins via the web UI — no reflashing needed:
+Периферия настраивается через веб-интерфейс или BLE — без перепрошивки.
 
-- Relay, Button, DHT22, DS18B20, NeoPixel, Analog input, PWM output
+| Тип | Описание | MQTT команда | MQTT состояние |
+|-----|----------|--------------|----------------|
+| `relay` | Цифровой выход | `{"on":true}` / `{"pulse":500}` | `{"on":bool}` |
+| `button` | Кнопка INPUT_PULLUP | — | `{"pressed":bool}` |
+| `analog` | АЦП вход (10 с) | — | `{"value":int,"voltage":float}` |
+| `pwm` | ШИМ выход | `{"duty":0-255}` | `{"duty":int}` |
+| `neopixel` | WS2812 (внешний) | `{"r":0,"g":255,"b":0}` | то же |
+| `dht22` | Темп+влажность (stub) | — | `{"temp":float,"humidity":float}` |
+| `ds18b20` | Температура (stub) | — | `{"temp":float}` |
 
-Config is stored in NVS and survives reboots.
+Конфиг хранится в NVS, переживает перезагрузки и обновления прошивки.
 
-## PlatformIO install
+## Automation Rules (сценарии)
+
+Настраиваются через `/gpio` → Сценарии:
+
+```
+button [pressed|released|any] → relay [on|off|toggle|pulse]
+```
+
+Поддерживается `pulseMs` — автовыключение реле через N мс.
+
+## MQTT протокол (mpcbstudio v1.0)
+
+Полная спецификация: [FIRMWARE_SPEC.md](https://github.com/remixvit/mpcbstudio-api/blob/main/FIRMWARE_SPEC.md)
+
+**Последовательность при каждом подключении:**
+```
+1. connect с LWT  mpcb/devices/{id}/announce  {"online":false}  retain QoS1
+2. publish        mpcb/devices/{id}/announce  {"online":true,"ip":"..."}  retain
+3. subscribe      mpcb/devices/{id}/+/set  (wildcard, одна подписка)
+4. publish        mpcb/devices/{id}/config  {device_id, firmware, version, ip, peripherals[]}  retain
+5. publish        mpcb/devices/{id}/{key}/state  для каждой периферии  retain
+```
+
+**key** = `sanitize(label)`: нижний регистр, пробел/дефис/подчёркивание → `_`.
+
+## BLE конфигурация
+
+Устройство всегда доступно по BLE (NimBLE-Arduino).  
+GATT сервис `181A`, характеристики:
+- `2A6E` NOTIFY — статус JSON (обновляется каждую секунду)
+- `2A6F` READ — настройки JSON (wifi, mqtt, peripherals, rules)
+- `2A70` WRITE — команды JSON
+
+BLE команды:
+```json
+{"cmd": "reboot"}
+{"cmd": "reset_wifi"}
+{"cmd": "wifi_scan"}
+{"wifi_ssid": "...", "wifi_pass": "..."}
+{"mqtt_host": "...", "mqtt_port": 8883, "mqtt_user": "...", "mqtt_pass": "...", "mqtt_tls": true}
+{"peripherals": [...]}
+{"rules": [...]}
+```
+
+OTA сервис `FB1E4001` — прошивка по BLE.
+
+## PlatformIO
 
 ```ini
 lib_deps =
     https://github.com/remixvit/mpcb-iot-core
+    knolleary/PubSubClient @ ^2.8
+    bblanchon/ArduinoJson @ ^7.0
+    h2zero/NimBLE-Arduino @ ^2.0
 ```
 
-## State machine
+## FSM состояния
 
 ```
 BOOTING → CONNECTING → CONFIG_SERVER → RUNNING
        ↘ AP_PORTAL ↗
 ```
 
-- `AP_PORTAL` — no WiFi credentials, captive portal active
-- `CONFIG_SERVER` — WiFi connected, web server running
-- `RUNNING` — MQTT connected, ready
+- `BOOTING` — инициализация
+- `AP_PORTAL` — нет WiFi, AP активен
+- `CONNECTING` — идёт подключение к WiFi
+- `CONFIG_SERVER` — WiFi подключён, сервер работает, MQTT соединяется
+- `RUNNING` — MQTT подключён, всё работает
 
-## Supported platforms
+## Поддерживаемые платформы
 
-ESP32, ESP32-C6, ESP32-S2, ESP32-S3 (any Arduino-framework ESP32)
+ESP32, ESP32-C6, ESP32-C3, ESP32-S2, ESP32-S3 (Arduino framework)
 
 ## License
 

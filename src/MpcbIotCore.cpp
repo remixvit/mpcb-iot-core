@@ -84,6 +84,29 @@ void MpcbIotCore::_bleLoop() {
     _bleOta.loop();
     if (!_ble.connected()) return;
     uint32_t now = millis();
+
+    if (_wifiScanPending) {
+        int n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_RUNNING) return;
+        _wifiScanPending = false;
+        if (n > 0) {
+            JsonDocument doc;
+            JsonArray arr = doc["wifi_networks"].to<JsonArray>();
+            for (int i = 0; i < n; i++) {
+                JsonObject net = arr.add<JsonObject>();
+                net["ssid"] = WiFi.SSID(i);
+                net["rssi"] = WiFi.RSSI(i);
+            }
+            String out;
+            serializeJson(doc, out);
+            _ble.updateStatus(out);
+            WiFi.scanDelete();
+            Log.log("BLE", "WiFi scan: " + String(n) + " networks");
+        }
+        if (_state == IotState::AP_PORTAL) WiFi.mode(WIFI_AP);
+        return;
+    }
+
     if (now - _bleStatusAt >= 1000) {
         _bleStatusAt = now;
         _ble.updateStatus(_buildStatusJson());
@@ -172,14 +195,29 @@ void MpcbIotCore::_connectMqtt() {
     PubSubClient* mqtt = reinterpret_cast<PubSubClient*>(_mqttClient);
     mqtt->setServer(cfg.host.c_str(), cfg.port);
 
+    String lwtTopic   = "mpcb/devices/" + dev.deviceId + "/announce";
+    String lwtPayload = "{\"online\":false}";
+
     Log.log("MQTT", "Connecting to " + cfg.host + ":" + String(cfg.port) + "...");
     bool ok = cfg.user.isEmpty()
-        ? mqtt->connect(dev.deviceId.c_str())
-        : mqtt->connect(dev.deviceId.c_str(), cfg.user.c_str(), cfg.password.c_str());
+        ? mqtt->connect(dev.deviceId.c_str(),
+                        nullptr, nullptr,
+                        lwtTopic.c_str(), 1, true, lwtPayload.c_str())
+        : mqtt->connect(dev.deviceId.c_str(),
+                        cfg.user.c_str(), cfg.password.c_str(),
+                        lwtTopic.c_str(), 1, true, lwtPayload.c_str());
 
     if (ok) {
         Log.log("MQTT", "Connected OK");
-        _setState(IotState::RUNNING);
+        // Announce online
+        String ann = "{\"online\":true,\"ip\":\"" + WiFi.localIP().toString() + "\"}";
+        mqtt->publish(lwtTopic.c_str(), ann.c_str(), true);
+        Log.log("MQTT", "Announced online");
+
+        if (_state != IotState::RUNNING) {
+            _setState(IotState::RUNNING);
+        }
+        if (_onConnected) _onConnected();
     } else {
         Log.log("MQTT", "Failed rc=" + String(mqtt->state()) + ", retry in 5s");
         _mqttReconnectAt = millis() + 5000;
@@ -264,6 +302,12 @@ void MpcbIotCore::_handleBleCommand(const String& json) {
         String cmd = doc["cmd"].as<String>();
         if (cmd == "reboot")     { Log.log("BLE", "reboot cmd"); delay(300); ESP.restart(); }
         if (cmd == "reset_wifi") { _storage.clearWifi(); delay(300); ESP.restart(); }
+        if (cmd == "wifi_scan") {
+            if (_state == IotState::AP_PORTAL) WiFi.mode(WIFI_AP_STA);
+            WiFi.scanNetworks(true);
+            _wifiScanPending = true;
+            Log.log("BLE", "WiFi scan started");
+        }
         return;
     }
 

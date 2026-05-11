@@ -64,6 +64,9 @@ public:
     // Returns true if the message was handled by a peripheral
     bool handleMessage(const String& topic, const String& payload);
 
+    // Call from iot.onMqttConnected() — re-subscribe, publish config + all states
+    void onMqttConnected();
+
     uint8_t count() const { return _count; }
 
 private:
@@ -71,6 +74,7 @@ private:
     void _loopPeriph(Peripheral& p);
     void _applyCommand(Peripheral& p, const String& payload);
     void _publishState(const Peripheral& p);
+    void _publishConfig();
     void _checkRules(const String& triggerKey, const String& event);
     void _applyAction(Peripheral& p, const String& action, uint32_t pulseMs = 0);
 

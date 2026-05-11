@@ -1,5 +1,6 @@
 #include "PeriphManager.h"
 #include "../MpcbIotCore.h"
+#include <WiFi.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -8,7 +9,7 @@ String PeriphManager::_sanitize(const String& s) {
     out.reserve(s.length());
     for (char c : s) {
         if (isAlphaNumeric(c)) out += (char)tolower(c);
-        else if (c == ' ' || c == '-') out += '_';
+        else if (c == ' ' || c == '-' || c == '_') out += '_';
     }
     return out;
 }
@@ -58,9 +59,9 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
         for (JsonObject obj : rdoc.as<JsonArray>()) {
             if (_rulesCount >= MAX_RULES) break;
             Rule& r = _rules[_rulesCount];
-            r.triggerKey = obj["trigger"].as<String>();
+            r.triggerKey = _sanitize(obj["trigger"].as<String>());
             r.event      = obj["event"].as<String>();
-            r.targetKey  = obj["target"].as<String>();
+            r.targetKey  = _sanitize(obj["target"].as<String>());
             r.action     = obj["action"].as<String>();
             r.pulseMs    = obj["pulseMs"] | 500;
             if (r.triggerKey.isEmpty() || r.targetKey.isEmpty()) continue;
@@ -78,15 +79,12 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         pinMode(p.pin, OUTPUT);
         digitalWrite(p.pin, LOW);
         p.boolState = false;
-        _iot->subscribe(p.topicSet);
-        _publishState(p);
         p.initialized = true;
 
     } else if (p.type == "button") {
         pinMode(p.pin, INPUT_PULLUP);
         p.boolState = !digitalRead(p.pin);
         p.prevBool  = p.boolState;
-        _publishState(p);
         p.initialized = true;
 
     } else if (p.type == "analog") {
@@ -98,14 +96,9 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         ledcAttach(p.pin, 1000, 8);  // 1kHz, 8-bit (0-255)
         ledcWrite(p.pin, 0);
         p.intState = 0;
-        _iot->subscribe(p.topicSet);
-        _publishState(p);
         p.initialized = true;
 
     } else if (p.type == "neopixel") {
-        // NeoPixel init requires Adafruit_NeoPixel — user manages it externally.
-        // PeriphManager subscribes to the topic; user handles the actual LED.
-        _iot->subscribe(p.topicSet);
         Log.log("Periph", "neopixel: subscribe only — control your LED in onMessage()");
         p.initialized = true;
 
@@ -136,12 +129,13 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
     uint32_t now = millis();
 
     if (p.type == "button") {
-        bool pressed = !digitalRead(p.pin);  // pullup: LOW = pressed
-        if (pressed != p.prevBool) {
-            p.boolState = pressed;
-            p.prevBool  = pressed;
+        bool cur = !digitalRead(p.pin);  // pullup: LOW = pressed
+        if (cur != p.prevBool && (millis() - p.lastReadMs) >= 10) {
+            p.lastReadMs = millis();
+            p.boolState  = cur;
+            p.prevBool   = cur;
             _publishState(p);
-            _checkRules(p.key, pressed ? "pressed" : "released");
+            _checkRules(p.key, cur ? "pressed" : "released");
             _checkRules(p.key, "any");
         }
 
@@ -168,6 +162,36 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+void PeriphManager::onMqttConnected() {
+    // Wildcard subscribe: one call covers all current and future /set topics
+    _iot->subscribe("mpcb/devices/" + _deviceId + "/+/set");
+    _publishConfig();
+    // Publish current state of all peripherals (after config — per spec order)
+    for (uint8_t i = 0; i < _count; i++) {
+        if (_list[i].initialized) _publishState(_list[i]);
+    }
+}
+
+void PeriphManager::_publishConfig() {
+    JsonDocument doc;
+    doc["device_id"]   = _deviceId;
+    doc["device_name"] = _iot ? _iot->storage().loadDevice().deviceName : "";
+    doc["firmware"]    = "MpcbIotCore";
+    doc["version"]     = MPCB_FIRMWARE_VERSION;
+    doc["ip"]          = WiFi.localIP().toString();
+    JsonArray arr = doc["peripherals"].to<JsonArray>();
+    for (uint8_t i = 0; i < _count; i++) {
+        JsonObject obj = arr.add<JsonObject>();
+        obj["key"]   = _list[i].key;
+        obj["type"]  = _list[i].type;
+        obj["label"] = _list[i].label;
+    }
+    String out;
+    serializeJson(doc, out);
+    _iot->publish("mpcb/devices/" + _deviceId + "/config", out, true);
+    Log.log("MQTT", "Config published: " + String(_count) + " peripheral(s)");
+}
+
 bool PeriphManager::handleMessage(const String& topic, const String& payload) {
     for (uint8_t i = 0; i < _count; i++) {
         if (topic == _list[i].topicSet) {
@@ -183,6 +207,10 @@ void PeriphManager::_applyCommand(Peripheral& p, const String& payload) {
     if (deserializeJson(doc, payload) != DeserializationError::Ok) return;
 
     if (p.type == "relay") {
+        if (doc["pulse"].is<int>()) {
+            _applyAction(p, "pulse", doc["pulse"].as<int>());
+            return;
+        }
         if (doc["on"].is<bool>()) {
             p.boolState = doc["on"].as<bool>();
             digitalWrite(p.pin, p.boolState ? HIGH : LOW);
@@ -295,5 +323,5 @@ void PeriphManager::_publishState(const Peripheral& p) {
         return;
     }
 
-    _iot->publish(p.topicState, payload, false);
+    _iot->publish(p.topicState, payload, true);  // retain=true
 }

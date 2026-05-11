@@ -10,6 +10,8 @@
 #include "ble/BleConfig.h"
 #include "ble/BleOta.h"
 
+#define MPCB_FIRMWARE_VERSION "1.0.0"
+
 enum class IotState {
     BOOTING,
     AP_PORTAL,
@@ -20,15 +22,17 @@ enum class IotState {
 
 class MpcbIotCore {
 public:
-    using StateCallback   = std::function<void(IotState state)>;
-    using MqttCallback    = std::function<void(const String& topic, const String& payload)>;
+    using StateCallback     = std::function<void(IotState state)>;
+    using MqttCallback      = std::function<void(const String& topic, const String& payload)>;
+    using ConnectedCallback = std::function<void()>;
 
     void begin(const String& deviceName = "");
     void loop();
 
     // Callbacks
-    void onStateChange(StateCallback cb)  { _onState = cb; }
-    void onMqttMessage(MqttCallback cb)   { _onMqtt = cb; }
+    void onStateChange(StateCallback cb)    { _onState     = cb; }
+    void onMqttMessage(MqttCallback cb)     { _onMqtt      = cb; }
+    void onMqttConnected(ConnectedCallback cb) { _onConnected = cb; }
 
     // MQTT
     bool publish(const String& topic, const String& payload, bool retain = false);
@@ -66,7 +70,9 @@ private:
     String        _apName;
     uint32_t      _mqttReconnectAt = 0;
     uint32_t      _bleStatusAt     = 0;
+    bool          _wifiScanPending = false;
 
-    StateCallback _onState;
-    MqttCallback  _onMqtt;
+    StateCallback     _onState;
+    MqttCallback      _onMqtt;
+    ConnectedCallback _onConnected;
 };
