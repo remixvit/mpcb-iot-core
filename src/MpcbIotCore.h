@@ -7,6 +7,8 @@
 #include "web/ConfigServer.h"
 #include "log/RingLog.h"
 #include "peripheral/PeriphManager.h"
+#include "ble/BleConfig.h"
+#include "ble/BleOta.h"
 
 enum class IotState {
     BOOTING,
@@ -43,9 +45,15 @@ private:
     void _startConfigServer();
     void _connectMqtt();
     void _mqttLoop();
+    void _bleLoop();
+    void _handleBleCommand(const String& json);
+    String _buildSettingsJson();
+    String _buildStatusJson();
 
     ConfigStorage _storage;
     WiFiConnect   _wifi;
+    BleConfig     _ble;
+    BleOta        _bleOta;
 
     APPortal*     _portal = nullptr;
     ConfigServer* _configServer = nullptr;
@@ -57,6 +65,7 @@ private:
     IotState      _state = IotState::BOOTING;
     String        _apName;
     uint32_t      _mqttReconnectAt = 0;
+    uint32_t      _bleStatusAt     = 0;
 
     StateCallback _onState;
     MqttCallback  _onMqtt;

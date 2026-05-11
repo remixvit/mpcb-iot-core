@@ -26,6 +26,13 @@ void MpcbIotCore::begin(const String& deviceName) {
     Log.log("IoT", "Device: " + dev.deviceName + " (" + dev.deviceId + ")");
     Log.log("IoT", "MAC: " + WiFi.macAddress());
 
+    // ── BLE — запускается всегда, независимо от WiFi ─────────────────────────
+    _ble.begin(_apName.c_str(),
+        [this](const String& json) { _handleBleCommand(json); },
+        [this](NimBLEServer* server) { _bleOta.createService(server)->start(); }
+    );
+    _ble.updateSettings(_buildSettingsJson());
+
     _setState(IotState::BOOTING);
 
     if (_storage.hasWifi()) {
@@ -68,6 +75,18 @@ void MpcbIotCore::loop() {
 
         default:
             break;
+    }
+
+    _bleLoop();
+}
+
+void MpcbIotCore::_bleLoop() {
+    _bleOta.loop();
+    if (!_ble.connected()) return;
+    uint32_t now = millis();
+    if (now - _bleStatusAt >= 1000) {
+        _bleStatusAt = now;
+        _ble.updateStatus(_buildStatusJson());
     }
 }
 
@@ -187,6 +206,106 @@ bool MpcbIotCore::publish(const String& topic, const String& payload, bool retai
     bool ok = mqtt->publish(topic.c_str(), payload.c_str(), retain);
     if (ok) Log.log("MQTT", "→ " + topic + ": " + payload);
     return ok;
+}
+
+// ---------------------------------------------------------------------------
+// BLE helpers
+// ---------------------------------------------------------------------------
+
+String MpcbIotCore::_buildSettingsJson() {
+    DeviceConfig dev  = _storage.loadDevice();
+    MqttConfig   mqtt = _storage.loadMqtt();
+    WifiConfig   wifi = _storage.loadWifi();
+
+    JsonDocument doc;
+    doc["device_id"]   = dev.deviceId;
+    doc["device_name"] = dev.deviceName;
+    doc["wifi_ssid"]   = wifi.ssid;
+    doc["mqtt_host"]   = mqtt.host;
+    doc["mqtt_port"]   = mqtt.port;
+    doc["mqtt_user"]   = mqtt.user;
+    doc["mqtt_tls"]    = mqtt.tls;
+    doc["ip"]          = WiFi.localIP().toString();
+
+    // Peripherals and rules as nested JSON
+    JsonDocument pd, rd;
+    if (deserializeJson(pd, _storage.loadPeripherals()) == DeserializationError::Ok)
+        doc["peripherals"] = pd;
+    if (deserializeJson(rd, _storage.loadRules()) == DeserializationError::Ok)
+        doc["rules"] = rd;
+
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
+String MpcbIotCore::_buildStatusJson() {
+    static const char* stateNames[] = {
+        "BOOTING", "AP_PORTAL", "CONNECTING", "CONFIG_SERVER", "RUNNING"
+    };
+    JsonDocument doc;
+    doc["state"]  = stateNames[(int)_state];
+    doc["ip"]     = WiFi.localIP().toString();
+    doc["rssi"]   = WiFi.RSSI();
+    doc["mqtt"]   = (_state == IotState::RUNNING);
+    doc["uptime"] = millis() / 1000;
+    doc["heap"]   = ESP.getFreeHeap() / 1024;
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
+void MpcbIotCore::_handleBleCommand(const String& json) {
+    JsonDocument doc;
+    if (deserializeJson(doc, json) != DeserializationError::Ok) return;
+
+    // Special commands
+    if (doc["cmd"].is<const char*>()) {
+        String cmd = doc["cmd"].as<String>();
+        if (cmd == "reboot")     { Log.log("BLE", "reboot cmd"); delay(300); ESP.restart(); }
+        if (cmd == "reset_wifi") { _storage.clearWifi(); delay(300); ESP.restart(); }
+        return;
+    }
+
+    bool needReboot = false;
+
+    if (doc["wifi_ssid"].is<const char*>()) {
+        _storage.saveWifi(doc["wifi_ssid"].as<String>(),
+                          doc["wifi_pass"] | String(""));
+        needReboot = true;
+        Log.log("BLE", "WiFi saved: " + doc["wifi_ssid"].as<String>());
+    }
+    if (doc["mqtt_host"].is<const char*>()) {
+        MqttConfig cfg = _storage.loadMqtt();
+        cfg.host     = doc["mqtt_host"].as<String>();
+        cfg.port     = doc["mqtt_port"] | cfg.port;
+        cfg.user     = doc["mqtt_user"] | cfg.user;
+        if (doc["mqtt_pass"].is<const char*>()) cfg.password = doc["mqtt_pass"].as<String>();
+        cfg.tls      = doc["mqtt_tls"] | cfg.tls;
+        _storage.saveMqtt(cfg);
+        Log.log("BLE", "MQTT saved: " + cfg.host);
+    }
+    if (doc["device_name"].is<const char*>()) {
+        DeviceConfig dev = _storage.loadDevice();
+        dev.deviceName = doc["device_name"].as<String>();
+        _storage.saveDevice(dev);
+    }
+    if (doc["peripherals"].is<JsonArray>()) {
+        String out;
+        serializeJson(doc["peripherals"], out);
+        _storage.savePeripherals(out);
+        Log.log("BLE", "Peripherals saved");
+    }
+    if (doc["rules"].is<JsonArray>()) {
+        String out;
+        serializeJson(doc["rules"], out);
+        _storage.saveRules(out);
+        Log.log("BLE", "Rules saved");
+    }
+
+    _ble.updateSettings(_buildSettingsJson());
+
+    if (needReboot) { delay(500); ESP.restart(); }
 }
 
 bool MpcbIotCore::subscribe(const String& topic) {
