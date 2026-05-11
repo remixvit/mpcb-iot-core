@@ -22,6 +22,7 @@ private:
     void _handleMqtt();
     void _handleGpio();
     void _handleOta();
+    void _handleLogs();
     void _handleSaveWifi();
     void _handleSaveMqtt();
     void _handleSaveGpio();

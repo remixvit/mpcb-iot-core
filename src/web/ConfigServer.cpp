@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <Update.h>
+#include "../log/RingLog.h"
 
 // ---------------------------------------------------------------------------
 // HTML шаблоны (PROGMEM)
@@ -55,6 +56,7 @@ static String _page(const String& title, const String& activeTab, const String& 
         "<a href='/wifi' " + String(activeTab=="wifi"?"class='active'":"") + ">&#x1F4F6; WiFi</a>"
         "<a href='/mqtt' " + String(activeTab=="mqtt"?"class='active'":"") + ">&#x1F4E1; MQTT</a>"
         "<a href='/gpio' " + String(activeTab=="gpio"?"class='active'":"") + ">&#x26A1; GPIO</a>"
+        "<a href='/logs' " + String(activeTab=="logs"?"class='active'":"") + ">&#x1F4CB; Логи</a>"
         "<a href='/ota' "  + String(activeTab=="ota" ?"class='active'":"") + ">&#x1F4E6; OTA</a>"
         "</nav>";
 
@@ -82,7 +84,16 @@ void ConfigServer::begin() {
     _server.on("/api/gpio",    HTTP_POST, [this](){ _handleSaveGpio(); });
     _server.on("/api/device",  HTTP_POST, [this](){ _handleSaveDevice(); });
     _server.on("/api/reset",   HTTP_POST, [this](){ _handleReset(); });
-    _server.on("/api/status",  [this](){ _handleStatus(); });
+    _server.on("/api/status",   [this](){ _handleStatus(); });
+    _server.on("/api/log-text", [this](){
+        _server.send(200, "text/plain; charset=utf-8", Log.toText());
+    });
+
+    _server.on("/logs", [this](){ _handleLogs(); });
+    _server.on("/api/logs/clear", HTTP_POST, [this](){
+        Log.clear();
+        _server.send(200, "application/json", "{\"ok\":true}");
+    });
 
     _server.on("/ota", HTTP_GET, [this](){ _handleOta(); });
     _server.on("/ota", HTTP_POST,
@@ -287,6 +298,48 @@ void ConfigServer::_handleStatus() {
                   "\"mqtt\":\"" + mqtt.host + "\","
                   "\"rssi\":" + WiFi.RSSI() + "}";
     _server.send(200, "application/json", json);
+}
+
+// ---------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------
+
+void ConfigServer::_handleLogs() {
+    String uptime = String(millis() / 60000) + "m " + String((millis() / 1000) % 60) + "s";
+    String rssi   = String(WiFi.RSSI()) + " dBm";
+
+    String body =
+        "<div class='card'>"
+        "<h2>&#x1F4CB; Лог устройства</h2>"
+        "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'>"
+        "<span style='font-size:.85rem;color:#888'>Uptime: " + uptime + " &nbsp;|&nbsp; WiFi: " + rssi + " &nbsp;|&nbsp; "
+        "<span id='cnt'>" + String(Log.count()) + "</span> записей в буфере</span>"
+        "<div style='display:flex;gap:8px'>"
+        "<button class='sec' style='margin:0;padding:6px 14px;font-size:.8rem' onclick='loadLogs()'>&#x21BA; Обновить</button>"
+        "<button style='margin:0;padding:6px 14px;font-size:.8rem;background:#3b1a1a' onclick='clearLogs()'>&#x1F5D1; Очистить</button>"
+        "</div></div>"
+        "<pre id='log' style='background:#0a0a1a;border-radius:10px;padding:16px;font-size:.78rem;"
+        "color:#8fc;overflow-y:auto;max-height:60vh;white-space:pre-wrap;word-break:break-all;min-height:120px'>"
+        "Загрузка...</pre>"
+        "</div>"
+        "<script>"
+        "function loadLogs(){"
+        "fetch('/api/log-text').then(r=>r.text()).then(t=>{"
+        "document.getElementById('log').textContent=t||'-- пусто --';"
+        "});"
+        "fetch('/api/status').then(r=>r.json()).then(d=>{"
+        "// refresh done"
+        "});}"
+        "function clearLogs(){"
+        "fetch('/api/logs/clear',{method:'POST'}).then(()=>{"
+        "document.getElementById('log').textContent='-- очищен --';"
+        "document.getElementById('cnt').textContent='0';"
+        "});}"
+        "loadLogs();"
+        "setInterval(loadLogs,5000);"  // auto-refresh every 5s
+        "</script>";
+
+    _server.send(200, "text/html", _page("Логи", "logs", body));
 }
 
 // ---------------------------------------------------------------------------
