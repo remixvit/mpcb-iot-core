@@ -83,3 +83,16 @@ void ConfigStorage::savePeripherals(const String& json) {
     _prefs.putString("cfg", json);
     _prefs.end();
 }
+
+String ConfigStorage::loadRules() {
+    _prefs.begin("rules", true);
+    String json = _prefs.getString("cfg", "[]");
+    _prefs.end();
+    return json;
+}
+
+void ConfigStorage::saveRules(const String& json) {
+    _prefs.begin("rules", false);
+    _prefs.putString("cfg", json);
+    _prefs.end();
+}

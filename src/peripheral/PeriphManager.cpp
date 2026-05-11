@@ -49,6 +49,25 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
     }
 
     Log.log("Periph", "Initialized " + String(_count) + " peripheral(s)");
+
+    // ── Rules ────────────────────────────────────────────────────────────────
+    _rulesCount = 0;
+    String rulesJson = storage.loadRules();
+    JsonDocument rdoc;
+    if (deserializeJson(rdoc, rulesJson) == DeserializationError::Ok && rdoc.is<JsonArray>()) {
+        for (JsonObject obj : rdoc.as<JsonArray>()) {
+            if (_rulesCount >= MAX_RULES) break;
+            Rule& r = _rules[_rulesCount];
+            r.triggerKey = obj["trigger"].as<String>();
+            r.event      = obj["event"].as<String>();
+            r.targetKey  = obj["target"].as<String>();
+            r.action     = obj["action"].as<String>();
+            if (r.triggerKey.isEmpty() || r.targetKey.isEmpty()) continue;
+            Log.log("Rules", r.triggerKey + " " + r.event + " → " + r.action + " " + r.targetKey);
+            _rulesCount++;
+        }
+    }
+    Log.log("Rules", "Loaded " + String(_rulesCount) + " rule(s)");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,6 +140,8 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             p.boolState = pressed;
             p.prevBool  = pressed;
             _publishState(p);
+            _checkRules(p.key, pressed ? "pressed" : "released");
+            _checkRules(p.key, "any");
         }
 
     } else if (p.type == "analog") {
@@ -173,6 +194,45 @@ void PeriphManager::_applyCommand(Peripheral& p, const String& payload) {
             p.floatState2 = doc["b"] | 0;
             _publishState(p);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+void PeriphManager::_checkRules(const String& triggerKey, const String& event) {
+    for (uint8_t i = 0; i < _rulesCount; i++) {
+        Rule& r = _rules[i];
+        if (r.triggerKey != triggerKey) continue;
+        if (r.event != event) continue;
+        for (uint8_t j = 0; j < _count; j++) {
+            if (_list[j].key == r.targetKey && _list[j].initialized) {
+                _applyAction(_list[j], r.action);
+                break;
+            }
+        }
+    }
+}
+
+void PeriphManager::_applyAction(Peripheral& p, const String& action) {
+    if (p.type == "relay") {
+        if (action == "on")          p.boolState = true;
+        else if (action == "off")    p.boolState = false;
+        else if (action == "toggle") p.boolState = !p.boolState;
+        else return;
+        digitalWrite(p.pin, p.boolState ? HIGH : LOW);
+        _publishState(p);
+        Log.log("Rules", p.key + " relay " + action + " → " + (p.boolState ? "ON" : "OFF"));
+
+    } else if (p.type == "pwm") {
+        if (action == "on")          p.intState = 255;
+        else if (action == "off")    p.intState = 0;
+        else if (action == "toggle") p.intState = (p.intState > 0) ? 0 : 255;
+        else return;
+        ledcWrite(p.pin, (uint32_t)p.intState);
+        _publishState(p);
+        Log.log("Rules", p.key + " pwm " + action + " → " + String(p.intState));
     }
 }
 

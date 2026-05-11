@@ -18,6 +18,19 @@ class MpcbIotCore;
 // ─────────────────────────────────────────────────────────────────────────────
 
 static constexpr uint8_t MAX_PERIPHERALS = 12;
+static constexpr uint8_t MAX_RULES       = 20;
+
+// ─── Automation rule ─────────────────────────────────────────────────────────
+// trigger: sanitized key of a button/sensor peripheral
+// event:   "pressed" | "released" | "any"
+// action:  "on" | "off" | "toggle"
+// target:  sanitized key of a relay/pwm peripheral
+struct Rule {
+    String triggerKey;
+    String event;
+    String targetKey;
+    String action;
+};
 
 struct Peripheral {
     String  type;
@@ -56,11 +69,15 @@ private:
     void _loopPeriph(Peripheral& p);
     void _applyCommand(Peripheral& p, const String& payload);
     void _publishState(const Peripheral& p);
+    void _checkRules(const String& triggerKey, const String& event);
+    void _applyAction(Peripheral& p, const String& action);
 
     static String _sanitize(const String& s);
 
     Peripheral   _list[MAX_PERIPHERALS];
-    uint8_t      _count    = 0;
-    MpcbIotCore* _iot      = nullptr;
+    uint8_t      _count      = 0;
+    Rule         _rules[MAX_RULES];
+    uint8_t      _rulesCount = 0;
+    MpcbIotCore* _iot        = nullptr;
     String       _deviceId;
 };

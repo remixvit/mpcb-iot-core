@@ -82,6 +82,7 @@ void ConfigServer::begin() {
     _server.on("/api/wifi",    HTTP_POST, [this](){ _handleSaveWifi(); });
     _server.on("/api/mqtt",    HTTP_POST, [this](){ _handleSaveMqtt(); });
     _server.on("/api/gpio",    HTTP_POST, [this](){ _handleSaveGpio(); });
+    _server.on("/api/rules",   HTTP_POST, [this](){ _handleSaveRules(); });
     _server.on("/api/device",  HTTP_POST, [this](){ _handleSaveDevice(); });
     _server.on("/api/reset",   HTTP_POST, [this](){ _handleReset(); });
     _server.on("/api/status",   [this](){ _handleStatus(); });
@@ -192,33 +193,95 @@ void ConfigServer::_handleMqtt() {
 
 void ConfigServer::_handleGpio() {
     String periphJson = _storage.loadPeripherals();
+    String rulesJson  = _storage.loadRules();
 
     String body =
+        // ── Peripherals card ────────────────────────────────────────────────
         "<div class='card'>"
-        "<h2>Периферия (GPIO конструктор)</h2>"
-        "<p style='font-size:.85rem;color:#888;margin-bottom:16px'>Добавьте устройства, подключённые к пинам ESP32</p>"
+        "<h2>Периферия (GPIO)</h2>"
+        "<p style='font-size:.85rem;color:#888;margin-bottom:16px'>Устройства, подключённые к пинам ESP32</p>"
         "<div id='list' class='periph-list'></div>"
         "<button class='sec' onclick='addItem()'>+ Добавить</button>"
         "<button onclick='savePeriph()' style='margin-left:8px'>Сохранить</button>"
         "</div>"
+
+        // ── Rules card ──────────────────────────────────────────────────────
+        "<div class='card'>"
+        "<h2>&#x26A1; Автоматизация (локальные правила)</h2>"
+        "<p style='font-size:.85rem;color:#888;margin-bottom:16px'>"
+        "Правила выполняются на устройстве без сервера. "
+        "Сначала сохраните периферию, затем задайте правила.</p>"
+        "<div id='rlist' class='periph-list'></div>"
+        "<button class='sec' onclick='addRule()'>+ Добавить правило</button>"
+        "<button onclick='saveRules()' style='margin-left:8px'>Сохранить правила</button>"
+        "</div>"
+
         "<script>"
-        "const TYPES=[{v:'relay',l:'Реле'},{v:'button',l:'Кнопка'},{v:'dht22',l:'DHT22 (темп/влажн)'}"
-        ",{v:'ds18b20',l:'DS18B20 (темп)'},{v:'neopixel',l:'NeoPixel RGB'},{v:'analog',l:'Аналог. вход'}"
-        ",{v:'pwm',l:'PWM выход'}];"
+        // sanitize — mirrors C++ _sanitize()
+        "function san(s){"
+        "let o='';for(let c of (s||'').toLowerCase()){"
+        "if(/[a-z0-9]/.test(c))o+=c;else if(c===' '||c==='-')o+='_';}return o;}"
+
+        // peripheral types
+        "const TYPES=[{v:'relay',l:'Реле'},{v:'button',l:'Кнопка'}"
+        ",{v:'dht22',l:'DHT22'},{v:'ds18b20',l:'DS18B20'}"
+        ",{v:'neopixel',l:'NeoPixel'},{v:'analog',l:'Аналог'},{v:'pwm',l:'PWM'}];"
+
         "let items=" + periphJson + ";"
+
+        // render peripherals
         "function render(){"
         "const l=document.getElementById('list');l.innerHTML='';"
         "items.forEach((it,i)=>{"
         "const d=document.createElement('div');d.className='periph-item';"
         "d.innerHTML=`<select onchange='items[${i}].type=this.value'>${TYPES.map(t=>"
         "`<option value='${t.v}'${it.type===t.v?' selected':''}>${t.l}</option>`).join('')}</select>"
-        "<input type='number' min='0' max='48' value='${it.pin}' placeholder='Pin' onchange='items[${i}].pin=+this.value' style='max-width:70px'>"
+        "<input type='number' min='0' max='48' value='${it.pin}' placeholder='Pin'"
+        " onchange='items[${i}].pin=+this.value' style='max-width:70px'>"
         "<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>"
-        "<button onclick='items.splice(${i},1);render()'>✕</button>`;"
+        "<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`;"
         "l.appendChild(d);});}"
+
         "function addItem(){items.push({type:'relay',pin:0,label:''});render();}"
         "function savePeriph(){post('/api/gpio',{peripherals:items},d=>toast(d.ok?'Сохранено':'Ошибка',d.ok));}"
         "render();"
+
+        // rules
+        "const EVENTS=[{v:'pressed',l:'нажата'},{v:'released',l:'отпущена'},{v:'any',l:'любое'}];"
+        "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'},{v:'off',l:'выключить'}];"
+        "let rules=" + rulesJson + ";"
+
+        "function periphOpts(sel){"
+        "return items.map(it=>{"
+        "const k=san(it.label)||it.type+'_'+it.pin;"
+        "const l=it.label||it.type+'_'+it.pin;"
+        "return`<option value='${k}'${k===sel?' selected':''}>${l}</option>`;}).join('');}"
+
+        "function renderRules(){"
+        "const l=document.getElementById('rlist');l.innerHTML='';"
+        "if(!rules.length){l.innerHTML='<p style=\"color:#666;font-size:.85rem\">Нет правил</p>';return;}"
+        "rules.forEach((r,i)=>{"
+        "const d=document.createElement('div');d.className='periph-item';"
+        "d.innerHTML="
+        "`<select onchange='rules[${i}].trigger=this.value'>${periphOpts(r.trigger)}</select>`"
+        "+`<select onchange='rules[${i}].event=this.value' style='max-width:110px'>`"
+        "+EVENTS.map(e=>`<option value='${e.v}'${r.event===e.v?' selected':''}>${e.l}</option>`).join('')"
+        "+`</select>`"
+        "+`<span style='color:#e94560;padding:0 2px'>&#x2192;</span>`"
+        "+`<select onchange='rules[${i}].action=this.value' style='max-width:120px'>`"
+        "+ACTIONS.map(a=>`<option value='${a.v}'${r.action===a.v?' selected':''}>${a.l}</option>`).join('')"
+        "+`</select>`"
+        "+`<select onchange='rules[${i}].target=this.value'>${periphOpts(r.target)}</select>`"
+        "+`<button onclick='rules.splice(${i},1);renderRules()'>&#x2715;</button>`;"
+        "l.appendChild(d);});}"
+
+        "function addRule(){"
+        "const k=items.length?san(items[0].label)||items[0].type+'_'+items[0].pin:'';"
+        "rules.push({trigger:k,event:'pressed',action:'toggle',target:k});"
+        "renderRules();}"
+
+        "function saveRules(){post('/api/rules',{rules:rules},d=>toast(d.ok?'Сохранено':'Ошибка',d.ok));}"
+        "renderRules();"
         "</script>";
 
     _server.send(200, "text/html", _page("GPIO", "gpio", body));
@@ -269,6 +332,18 @@ void ConfigServer::_handleSaveGpio() {
     _storage.savePeripherals(out);
     _server.send(200, "application/json", "{\"ok\":true}");
     if (_onSave) _onSave();
+}
+
+void ConfigServer::_handleSaveRules() {
+    JsonDocument doc;
+    if (deserializeJson(doc, _server.arg("plain")) != DeserializationError::Ok) {
+        _server.send(400, "application/json", "{\"ok\":false}");
+        return;
+    }
+    String out;
+    serializeJson(doc["rules"], out);
+    _storage.saveRules(out);
+    _server.send(200, "application/json", "{\"ok\":true}");
 }
 
 void ConfigServer::_handleSaveDevice() {

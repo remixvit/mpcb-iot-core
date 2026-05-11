@@ -38,6 +38,9 @@ public:
     String loadPeripherals();
     void savePeripherals(const String& json);
 
+    String loadRules();
+    void saveRules(const String& json);
+
 private:
     Preferences _prefs;
 };

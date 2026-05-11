@@ -26,6 +26,7 @@ private:
     void _handleSaveWifi();
     void _handleSaveMqtt();
     void _handleSaveGpio();
+    void _handleSaveRules();
     void _handleSaveDevice();
     void _handleReset();
     void _handleStatus();
