@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
+#include <ESPmDNS.h>
 
 // ---------------------------------------------------------------------------
 
@@ -93,6 +94,14 @@ void MpcbIotCore::_startAP() {
 void MpcbIotCore::_startConfigServer() {
     WiFi.mode(WIFI_STA);
     Log.log("IoT", "WiFi connected, IP: " + WiFi.localIP().toString());
+
+    // mDNS: device accessible at http://mpcb-XXXX.local
+    String mdnsName = _apName;  // "mpcb-XXXX"
+    if (MDNS.begin(mdnsName.c_str())) {
+        MDNS.addService("http", "tcp", 80);
+        Log.log("IoT", "mDNS: http://" + mdnsName + ".local");
+    }
+
     _configServer = new ConfigServer(_storage);
     _configServer->begin();
     Log.log("IoT", "Config server: http://" + WiFi.localIP().toString());

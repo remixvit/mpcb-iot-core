@@ -18,10 +18,12 @@ public:
 private:
     void _dump();
 
-    char    _buf[MAX_ENTRIES][ENTRY_LEN];
-    uint8_t _head        = 0;
-    uint8_t _count       = 0;
-    bool    _wasSerial   = false;
+    char     _buf[MAX_ENTRIES][ENTRY_LEN];
+    uint8_t  _head             = 0;
+    uint8_t  _count            = 0;
+    bool     _wasSerial        = false;
+    bool     _firstDumpDone    = false;
+    uint32_t _lastPeriodicDump = 0;
 };
 
 // Global instance — include this header and use Log.log() anywhere
