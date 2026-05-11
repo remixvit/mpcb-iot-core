@@ -6,6 +6,7 @@
 #include "wifi/WiFiConnect.h"
 #include "web/ConfigServer.h"
 #include "log/RingLog.h"
+#include "peripheral/PeriphManager.h"
 
 enum class IotState {
     BOOTING,
