@@ -1,6 +1,7 @@
 #include "ConfigServer.h"
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <Update.h>
 
 // ---------------------------------------------------------------------------
 // HTML шаблоны (PROGMEM)
@@ -50,10 +51,11 @@ function post(url,data,cb){
 
 static String _page(const String& title, const String& activeTab, const String& body) {
     String nav = "<nav>"
-        "<a href='/' " + String(activeTab=="home"?"class='active'":"") + ">&#x2302; Устройство</a>"
+        "<a href='/' "     + String(activeTab=="home"?"class='active'":"") + ">&#x2302; Устройство</a>"
         "<a href='/wifi' " + String(activeTab=="wifi"?"class='active'":"") + ">&#x1F4F6; WiFi</a>"
         "<a href='/mqtt' " + String(activeTab=="mqtt"?"class='active'":"") + ">&#x1F4E1; MQTT</a>"
         "<a href='/gpio' " + String(activeTab=="gpio"?"class='active'":"") + ">&#x26A1; GPIO</a>"
+        "<a href='/ota' "  + String(activeTab=="ota" ?"class='active'":"") + ">&#x1F4E6; OTA</a>"
         "</nav>";
 
     return "<!DOCTYPE html><html lang='ru'><head>"
@@ -81,6 +83,18 @@ void ConfigServer::begin() {
     _server.on("/api/device",  HTTP_POST, [this](){ _handleSaveDevice(); });
     _server.on("/api/reset",   HTTP_POST, [this](){ _handleReset(); });
     _server.on("/api/status",  [this](){ _handleStatus(); });
+
+    _server.on("/ota", HTTP_GET, [this](){ _handleOta(); });
+    _server.on("/ota", HTTP_POST,
+        [this](){
+            bool ok = !Update.hasError();
+            String msg = ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":\"" + String(Update.errorString()) + "\"}";
+            _server.send(200, "application/json", msg);
+            if (ok) { delay(500); ESP.restart(); }
+        },
+        [this](){ _handleOtaUpload(); }
+    );
+
     _server.begin();
     Serial.println("[Web] Config server started @ http://" + WiFi.localIP().toString());
 }
@@ -273,4 +287,91 @@ void ConfigServer::_handleStatus() {
                   "\"mqtt\":\"" + mqtt.host + "\","
                   "\"rssi\":" + WiFi.RSSI() + "}";
     _server.send(200, "application/json", json);
+}
+
+// ---------------------------------------------------------------------------
+// OTA
+// ---------------------------------------------------------------------------
+
+void ConfigServer::_handleOta() {
+    String freeKb = String(ESP.getFreeSketchSpace() / 1024);
+    String sketchKb = String(ESP.getSketchSize() / 1024);
+
+    String body =
+        "<div class='card'>"
+        "<h2>OTA — обновление прошивки</h2>"
+        "<p style='font-size:.85rem;color:#888;margin-bottom:16px'>"
+        "Скомпилируйте прошивку в PlatformIO (<b>.pio/build/…/firmware.bin</b>) и загрузите сюда.</p>"
+        "<table style='width:100%;font-size:.85rem;color:#aaa;margin-bottom:16px'>"
+        "<tr><td>Текущая прошивка</td><td>" + sketchKb + " KB</td></tr>"
+        "<tr><td>Свободно для OTA</td><td>" + freeKb + " KB</td></tr>"
+        "</table>"
+        "<div id='drop' style='border:2px dashed #555;border-radius:12px;padding:32px;text-align:center;cursor:pointer;transition:border-color .2s'>"
+        "&#x1F4C1; Перетащите .bin сюда или нажмите для выбора"
+        "<input type='file' id='file' accept='.bin' style='display:none'>"
+        "</div>"
+        "<div id='prog' style='display:none;margin-top:16px'>"
+        "<div style='background:#0f3460;border-radius:8px;overflow:hidden;height:24px'>"
+        "<div id='bar' style='height:100%;background:#e94560;width:0%;transition:width .3s;display:flex;align-items:center;justify-content:center;font-size:.8rem'></div>"
+        "</div>"
+        "<p id='ptext' style='text-align:center;margin-top:8px;color:#aaa;font-size:.85rem'></p>"
+        "</div>"
+        "<div id='status' style='margin-top:16px;text-align:center;font-size:.95rem'></div>"
+        "</div>"
+        "<script>"
+        "const drop=document.getElementById('drop');"
+        "const file=document.getElementById('file');"
+        "drop.onclick=()=>file.click();"
+        "drop.ondragover=e=>{e.preventDefault();drop.style.borderColor='#e94560';};"
+        "drop.ondragleave=()=>drop.style.borderColor='#555';"
+        "drop.ondrop=e=>{e.preventDefault();drop.style.borderColor='#555';"
+        "if(e.dataTransfer.files[0])upload(e.dataTransfer.files[0]);};"
+        "file.onchange=()=>{if(file.files[0])upload(file.files[0]);};"
+        "function upload(f){"
+        "if(!f.name.endsWith('.bin')){document.getElementById('status').innerHTML='<span style=\"color:#e94560\">Нужен файл .bin</span>';return;}"
+        "const prog=document.getElementById('prog');"
+        "const bar=document.getElementById('bar');"
+        "const pt=document.getElementById('ptext');"
+        "const st=document.getElementById('status');"
+        "prog.style.display='block';drop.style.display='none';"
+        "const fd=new FormData();fd.append('firmware',f);"
+        "const xhr=new XMLHttpRequest();"
+        "xhr.upload.onprogress=e=>{"
+        "if(e.lengthComputable){"
+        "const p=Math.round(e.loaded/e.total*100);"
+        "bar.style.width=p+'%';bar.textContent=p+'%';"
+        "pt.textContent='Загружено: '+Math.round(e.loaded/1024)+'/'+ Math.round(e.total/1024)+' KB';}};"
+        "xhr.onload=()=>{"
+        "const d=JSON.parse(xhr.responseText);"
+        "if(d.ok){bar.style.background='#4caf50';bar.textContent='✓ OK';"
+        "st.innerHTML='<span style=\"color:#4caf50\">Прошивка загружена! Устройство перезагружается...</span>';"
+        "setTimeout(()=>location.href='/',4000);"
+        "}else{bar.style.background='#e94560';bar.textContent='✗';"
+        "st.innerHTML='<span style=\"color:#e94560\">Ошибка: '+d.err+'</span>';drop.style.display='block';}};"
+        "xhr.onerror=()=>{st.innerHTML='<span style=\"color:#e94560\">Ошибка соединения</span>';drop.style.display='block';};"
+        "xhr.open('POST','/ota');xhr.send(fd);}"
+        "</script>";
+
+    _server.send(200, "text/html", _page("OTA", "ota", body));
+}
+
+void ConfigServer::_handleOtaUpload() {
+    HTTPUpload& upload = _server.upload();
+
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.println("[OTA] Start: " + upload.filename + " (" + String(upload.totalSize / 1024) + " KB)");
+        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+            Serial.println("[OTA] Begin error: " + String(Update.errorString()));
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Serial.println("[OTA] Write error: " + String(Update.errorString()));
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) {
+            Serial.println("[OTA] Done: " + String(upload.totalSize) + " bytes");
+        } else {
+            Serial.println("[OTA] End error: " + String(Update.errorString()));
+        }
+    }
 }

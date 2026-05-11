@@ -5,31 +5,15 @@
 
 // ---------------------------------------------------------------------------
 
-static MpcbIotCore* _instance = nullptr;
-
-static void _mqttCb(char* topic, byte* payload, unsigned int length) {
-    if (!_instance) return;
-    String t(topic);
-    String p;
-    for (unsigned int i = 0; i < length; i++) p += (char)payload[i];
-    // forward via stored callback — accessed through instance
-    // (we expose it via friend or static trampoline below)
-}
-
-// ---------------------------------------------------------------------------
-
 void MpcbIotCore::begin(const String& deviceName) {
-    _instance = this;
     _storage.begin();
 
-    // Build AP name: "mpcb-XXXX" from last 2 bytes of MAC
     uint8_t mac[6];
     WiFi.macAddress(mac);
     char suffix[5];
     snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
     _apName = "mpcb-" + String(suffix);
 
-    // Auto-fill deviceId if empty
     DeviceConfig dev = _storage.loadDevice();
     if (dev.deviceId.isEmpty()) {
         dev.deviceId = "esp32-" + String(suffix);
@@ -37,27 +21,32 @@ void MpcbIotCore::begin(const String& deviceName) {
         _storage.saveDevice(dev);
     }
 
-    Serial.println("[IoT] Device: " + dev.deviceName + " (" + dev.deviceId + ")");
+    Log.log("IoT", "Device: " + dev.deviceName + " (" + dev.deviceId + ")");
+    Log.log("IoT", "MAC: " + WiFi.macAddress());
 
     _setState(IotState::BOOTING);
 
     if (_storage.hasWifi()) {
         WifiConfig wifi = _storage.loadWifi();
+        Log.log("IoT", "Connecting to WiFi: " + wifi.ssid);
         _wifi.begin(wifi.ssid, wifi.password);
         _setState(IotState::CONNECTING);
 
         if (_wifi.waitConnected(12000)) {
             _startConfigServer();
         } else {
-            Serial.println("[IoT] WiFi failed, starting AP");
+            Log.log("IoT", "WiFi failed, starting AP portal");
             _startAP();
         }
     } else {
+        Log.log("IoT", "No WiFi saved, starting AP portal");
         _startAP();
     }
 }
 
 void MpcbIotCore::loop() {
+    Log.tick();
+
     switch (_state) {
         case IotState::AP_PORTAL:
             if (_portal) _portal->loop();
@@ -70,6 +59,7 @@ void MpcbIotCore::loop() {
             break;
 
         case IotState::RUNNING:
+            if (_configServer) _configServer->loop();
             _wifi.loop();
             _mqttLoop();
             break;
@@ -91,30 +81,35 @@ void MpcbIotCore::_startAP() {
     _portal = new APPortal(_apName);
     _portal->onConnect([this](const String& ssid, const String& pass) {
         _storage.saveWifi(ssid, pass);
-        delete _portal;
-        _portal = nullptr;
-        _startConfigServer();
+        Log.log("IoT", "WiFi saved: " + ssid + ". Rebooting...");
+        delay(300);
+        ESP.restart();
     });
     _portal->begin();
     _setState(IotState::AP_PORTAL);
-    Serial.println("[IoT] AP portal: connect to \"" + _apName + "\" → http://192.168.4.1");
+    Log.log("IoT", "AP portal: connect to \"" + _apName + "\" → http://192.168.4.1");
 }
 
 void MpcbIotCore::_startConfigServer() {
     WiFi.mode(WIFI_STA);
+    Log.log("IoT", "WiFi connected, IP: " + WiFi.localIP().toString());
     _configServer = new ConfigServer(_storage);
     _configServer->begin();
+    Log.log("IoT", "Config server: http://" + WiFi.localIP().toString());
     _setState(IotState::CONFIG_SERVER);
     _connectMqtt();
 }
 
 // ---------------------------------------------------------------------------
-// MQTT (lazy init)
+// MQTT
 // ---------------------------------------------------------------------------
 
 void MpcbIotCore::_connectMqtt() {
     MqttConfig cfg = _storage.loadMqtt();
-    if (cfg.host.isEmpty()) return;
+    if (cfg.host.isEmpty()) {
+        Log.log("MQTT", "No broker configured — skipping");
+        return;
+    }
 
     if (!_wifiClient) {
         if (cfg.tls) {
@@ -138,6 +133,7 @@ void MpcbIotCore::_connectMqtt() {
             String t(topic);
             String p;
             for (unsigned int i = 0; i < len; i++) p += (char)payload[i];
+            Log.log("MQTT", "← " + t + ": " + p);
             if (_onMqtt) _onMqtt(t, p);
         });
         _mqttClient = mqtt;
@@ -147,19 +143,16 @@ void MpcbIotCore::_connectMqtt() {
     PubSubClient* mqtt = reinterpret_cast<PubSubClient*>(_mqttClient);
     mqtt->setServer(cfg.host.c_str(), cfg.port);
 
-    Serial.print("[MQTT] Connecting to " + cfg.host + ":" + cfg.port + "...");
-    bool ok;
-    if (cfg.user.isEmpty()) {
-        ok = mqtt->connect(dev.deviceId.c_str());
-    } else {
-        ok = mqtt->connect(dev.deviceId.c_str(), cfg.user.c_str(), cfg.password.c_str());
-    }
+    Log.log("MQTT", "Connecting to " + cfg.host + ":" + String(cfg.port) + "...");
+    bool ok = cfg.user.isEmpty()
+        ? mqtt->connect(dev.deviceId.c_str())
+        : mqtt->connect(dev.deviceId.c_str(), cfg.user.c_str(), cfg.password.c_str());
 
     if (ok) {
-        Serial.println(" OK");
+        Log.log("MQTT", "Connected OK");
         _setState(IotState::RUNNING);
     } else {
-        Serial.println(" failed rc=" + String(mqtt->state()));
+        Log.log("MQTT", "Failed rc=" + String(mqtt->state()) + ", retry in 5s");
         _mqttReconnectAt = millis() + 5000;
     }
 }
@@ -181,12 +174,16 @@ bool MpcbIotCore::publish(const String& topic, const String& payload, bool retai
     if (!_mqttClient) return false;
     PubSubClient* mqtt = reinterpret_cast<PubSubClient*>(_mqttClient);
     if (!mqtt->connected()) return false;
-    return mqtt->publish(topic.c_str(), payload.c_str(), retain);
+    bool ok = mqtt->publish(topic.c_str(), payload.c_str(), retain);
+    if (ok) Log.log("MQTT", "→ " + topic + ": " + payload);
+    return ok;
 }
 
 bool MpcbIotCore::subscribe(const String& topic) {
     if (!_mqttClient) return false;
     PubSubClient* mqtt = reinterpret_cast<PubSubClient*>(_mqttClient);
     if (!mqtt->connected()) return false;
-    return mqtt->subscribe(topic.c_str());
+    bool ok = mqtt->subscribe(topic.c_str());
+    if (ok) Log.log("MQTT", "subscribed: " + topic);
+    return ok;
 }

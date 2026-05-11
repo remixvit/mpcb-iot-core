@@ -5,6 +5,7 @@
 #include "wifi/APPortal.h"
 #include "wifi/WiFiConnect.h"
 #include "web/ConfigServer.h"
+#include "log/RingLog.h"
 
 enum class IotState {
     BOOTING,

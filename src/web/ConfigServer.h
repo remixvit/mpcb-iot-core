@@ -21,14 +21,16 @@ private:
     void _handleWifi();
     void _handleMqtt();
     void _handleGpio();
+    void _handleOta();
     void _handleSaveWifi();
     void _handleSaveMqtt();
     void _handleSaveGpio();
     void _handleSaveDevice();
     void _handleReset();
     void _handleStatus();
+    void _handleOtaUpload();
 
     ConfigStorage& _storage;
-    WebServer _server{80};
-    SaveCallback _onSave;
+    WebServer      _server{80};
+    SaveCallback   _onSave;
 };
