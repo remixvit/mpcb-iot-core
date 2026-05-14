@@ -163,8 +163,8 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::onMqttConnected() {
-    // Wildcard subscribe: one call covers all current and future /set topics
-    _iot->subscribe("mpcb/devices/" + _deviceId + "/+/set");
+    // Subscribe to ALL topics for this device — helps debug message delivery
+    _iot->subscribe("mpcb/devices/" + _deviceId + "/#");
     _publishConfig();
     // Publish current state of all peripherals (after config — per spec order)
     for (uint8_t i = 0; i < _count; i++) {

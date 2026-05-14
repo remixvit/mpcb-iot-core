@@ -180,7 +180,7 @@ void MpcbIotCore::_connectMqtt() {
         } else {
             mqtt = new PubSubClient(*reinterpret_cast<WiFiClient*>(_wifiClient));
         }
-        mqtt->setBufferSize(512);
+        mqtt->setBufferSize(1024);
         mqtt->setCallback([this](char* topic, byte* payload, unsigned int len) {
             String t(topic);
             String p;
