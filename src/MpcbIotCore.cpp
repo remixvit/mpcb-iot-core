@@ -341,6 +341,11 @@ void MpcbIotCore::_handleBleCommand(const String& json) {
         Log.log("BLE", "Peripherals saved");
     }
     if (doc["rules"].is<JsonArray>()) {
+        // Normalise trigger/target to lowercase so keys match peripheral sanitized keys
+        for (JsonObject r : doc["rules"].as<JsonArray>()) {
+            if (r["trigger"].is<const char*>()) { String s = r["trigger"]; s.toLowerCase(); r["trigger"] = s; }
+            if (r["target"].is<const char*>())  { String s = r["target"];  s.toLowerCase(); r["target"]  = s; }
+        }
         String out;
         serializeJson(doc["rules"], out);
         _storage.saveRules(out);

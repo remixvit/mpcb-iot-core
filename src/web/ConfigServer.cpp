@@ -319,12 +319,13 @@ void ConfigServer::_handleGpio() {
         "let rules=" + rulesJson + ";"
 
         "function periphOpts(sel,filter){"
+        "const selN=san(sel||'');"  // normalise: handles BLE-saved keys with uppercase
         "const src=filter?items.filter(it=>filter.includes(it.type)):items;"
         "if(!src.length)return`<option value=''>—нет—</option>`;"
         "return src.map(it=>{"
         "const k=san(it.label)||it.type+'_'+it.pin;"
         "const l=it.label||it.type+'_'+it.pin;"
-        "return`<option value='${k}'${k===sel?' selected':''}>${l}</option>`;}).join('');}"
+        "return`<option value='${k}'${k===selN?' selected':''}>${l}</option>`;}).join('');}"
 
         // helper called by onchange on the action select
         "function onActChange(i,v){"
