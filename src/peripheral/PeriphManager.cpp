@@ -87,6 +87,7 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
             Rule& r = _rules[_rulesCount];
             r.triggerKey = _sanitize(obj["trigger"].as<String>());
             r.event      = obj["event"].as<String>();
+            r.threshold  = obj["threshold"] | 0.0f;
             r.targetKey  = _sanitize(obj["target"].as<String>());
             r.action     = obj["action"].as<String>();
             r.pulseMs    = obj["pulseMs"] | 500;
@@ -225,6 +226,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             p.intState    = raw;
             p.floatState  = raw * (3.3f / 4095.0f);  // 12-bit ADC → voltage
             _publishState(p);
+            _checkRulesValue(p.key, (float)p.intState);
         }
     } else if (p.type == "dht22") {
 #ifdef MPCB_HAS_DHT
@@ -236,6 +238,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
                 p.floatState  = t;
                 p.floatState2 = h;
                 _publishState(p);
+                _checkRulesValue(p.key, p.floatState, p.floatState2);
                 Log.log("Periph", p.key + " t=" + String(t, 1) + " h=" + String(h, 1));
             } else {
                 Log.log("Periph", p.key + " read failed");
@@ -253,6 +256,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (t != DEVICE_DISCONNECTED_C) {
                 p.floatState = t;
                 _publishState(p);
+                _checkRulesValue(p.key, p.floatState);
                 Log.log("Periph", p.key + " t=" + String(t, 1));
             } else {
                 Log.log("Periph", p.key + " not found on bus");
@@ -268,6 +272,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             p.floatState  = temp.temperature;
             p.floatState2 = hum.relative_humidity;
             _publishState(p);
+            _checkRulesValue(p.key, p.floatState, p.floatState2);
             Log.log("Periph", p.key + " t=" + String(temp.temperature, 1) + " h=" + String(hum.relative_humidity, 1));
         }
 #endif
@@ -357,6 +362,33 @@ void PeriphManager::_applyCommand(Peripheral& p, const String& payload) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+void PeriphManager::_checkRulesValue(const String& triggerKey, float val, float val2) {
+    for (uint8_t i = 0; i < _rulesCount; i++) {
+        Rule& r = _rules[i];
+        if (r.triggerKey != triggerKey) continue;
+        bool fire = false;
+        if      (r.event == "above"     || r.event == "temp_above") fire = (val  > r.threshold);
+        else if (r.event == "below"     || r.event == "temp_below") fire = (val  < r.threshold);
+        else if (r.event == "hum_above")                             fire = (val2 > r.threshold);
+        else if (r.event == "hum_below")                             fire = (val2 < r.threshold);
+        else continue;
+
+        if (fire && r.armed) {
+            r.armed = false;
+            for (uint8_t j = 0; j < _count; j++) {
+                if (_list[j].key == r.targetKey && _list[j].initialized) {
+                    _applyAction(_list[j], r.action, r.pulseMs);
+                    Log.log("Rules", triggerKey + " " + r.event + " " + String(r.threshold) +
+                            " → " + r.action + " " + r.targetKey);
+                    break;
+                }
+            }
+        } else if (!fire) {
+            r.armed = true;
+        }
+    }
+}
 
 void PeriphManager::_checkRules(const String& triggerKey, const String& event) {
     for (uint8_t i = 0; i < _rulesCount; i++) {

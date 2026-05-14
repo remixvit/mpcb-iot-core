@@ -28,9 +28,11 @@ static constexpr uint8_t MAX_RULES       = 20;
 struct Rule {
     String   triggerKey;
     String   event;
+    float    threshold = 0.0f;  // for sensor threshold events (above/below/temp_above/etc.)
     String   targetKey;
     String   action;
-    uint32_t pulseMs = 500;  // used when action == "pulse"
+    uint32_t pulseMs = 500;
+    bool     armed   = true;   // re-arms when condition reverses (hysteresis latch)
 };
 
 struct Peripheral {
@@ -79,6 +81,7 @@ private:
     void _publishState(const Peripheral& p);
     void _publishConfig();
     void _checkRules(const String& triggerKey, const String& event);
+    void _checkRulesValue(const String& triggerKey, float val, float val2 = 0.0f);
     void _applyAction(Peripheral& p, const String& action, uint32_t pulseMs = 0);
 
     static String _sanitize(const String& s);
