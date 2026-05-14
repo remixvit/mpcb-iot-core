@@ -102,6 +102,11 @@ void ConfigServer::begin() {
     _server.on("/api/rules",   HTTP_POST, [this](){ _handleSaveRules(); });
     _server.on("/api/device",  HTTP_POST, [this](){ _handleSaveDevice(); });
     _server.on("/api/reset",   HTTP_POST, [this](){ _handleReset(); });
+    _server.on("/api/reboot",  HTTP_POST, [this](){
+        _server.send(200, "application/json", "{\"ok\":true}");
+        delay(300);
+        ESP.restart();
+    });
     _server.on("/api/status",   [this](){ _handleStatus(); });
     _server.on("/api/log-text", [this](){
         _server.send(200, "text/plain; charset=utf-8", Log.toText());

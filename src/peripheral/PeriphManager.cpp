@@ -195,10 +195,12 @@ void PeriphManager::_publishConfig() {
 bool PeriphManager::handleMessage(const String& topic, const String& payload) {
     for (uint8_t i = 0; i < _count; i++) {
         if (topic == _list[i].topicSet) {
+            Log.log("Periph", "cmd " + _list[i].key + " ← " + payload);
             _applyCommand(_list[i], payload);
             return true;
         }
     }
+    Log.log("Periph", "unhandled: " + topic);
     return false;
 }
 
