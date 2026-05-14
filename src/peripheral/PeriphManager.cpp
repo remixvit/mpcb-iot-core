@@ -1,6 +1,7 @@
 #include "PeriphManager.h"
 #include "../MpcbIotCore.h"
 #include <WiFi.h>
+#include <Wire.h>
 
 #if __has_include(<DHT.h>)
   #include <DHT.h>
@@ -10,6 +11,10 @@
   #include <OneWire.h>
   #include <DallasTemperature.h>
   #define MPCB_HAS_DS18B20
+#endif
+#if __has_include(<Adafruit_AHTX0.h>)
+  #include <Adafruit_AHTX0.h>
+  #define MPCB_HAS_AHT
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,9 +48,10 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
         if (_count >= MAX_PERIPHERALS) break;
 
         Peripheral& p = _list[_count];
-        p.type  = obj["type"].as<String>();
-        p.pin   = obj["pin"]  | 0;
-        p.label = obj["label"].as<String>();
+        p.type    = obj["type"].as<String>();
+        p.pin     = obj["pin"]     | 0;
+        p.i2cAddr = obj["i2cAddr"] | 0;
+        p.label   = obj["label"].as<String>();
         if (p.label.isEmpty()) p.label = p.type + "_" + p.pin;
 
         p.key        = _sanitize(p.label);
@@ -60,6 +66,16 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
     }
 
     Log.log("Periph", "Initialized " + String(_count) + " peripheral(s)");
+
+    // ── I2C bus init (once) ──────────────────────────────────────────────────
+    for (uint8_t i = 0; i < _count; i++) {
+        const String& t = _list[i].type;
+        if (t == "aht10" || t == "vl53" || t == "pcf8574") {
+            Wire.begin(22, 23);
+            Log.log("Periph", "I2C init SDA=22 SCL=23");
+            break;
+        }
+    }
 
     // ── Rules ────────────────────────────────────────────────────────────────
     _rulesCount = 0;
@@ -137,6 +153,24 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         Log.log("Periph", "ds18b20 init pin=" + String(p.pin));
 #else
         Log.log("Periph", "ds18b20: add 'milesburton/DallasTemperature' to lib_deps");
+        p.initialized = false;
+#endif
+
+    } else if (p.type == "aht10") {
+#ifdef MPCB_HAS_AHT
+        uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x38;
+        Adafruit_AHTX0* aht = new Adafruit_AHTX0();
+        if (aht->begin(&Wire, 0, addr)) {
+            p.sensorObj  = aht;
+            p.lastReadMs = millis() - 29000;  // first read after ~1s
+            p.initialized = true;
+            Log.log("Periph", "aht10 init addr=0x" + String(addr, HEX));
+        } else {
+            delete aht;
+            Log.log("Periph", "aht10 not found at 0x" + String(addr, HEX));
+        }
+#else
+        Log.log("Periph", "aht10: add 'adafruit/Adafruit AHTX0' to lib_deps");
         p.initialized = false;
 #endif
 
@@ -225,6 +259,18 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             }
         }
 #endif
+    } else if (p.type == "aht10") {
+#ifdef MPCB_HAS_AHT
+        if (now - p.lastReadMs >= 30000) {
+            p.lastReadMs = now;
+            sensors_event_t hum, temp;
+            ((Adafruit_AHTX0*)p.sensorObj)->getEvent(&hum, &temp);
+            p.floatState  = temp.temperature;
+            p.floatState2 = hum.relative_humidity;
+            _publishState(p);
+            Log.log("Periph", p.key + " t=" + String(temp.temperature, 1) + " h=" + String(hum.relative_humidity, 1));
+        }
+#endif
     }
     // pwm / neopixel: event-driven only, nothing to poll
 }
@@ -238,7 +284,7 @@ void PeriphManager::onMqttConnected() {
         if (!_list[i].initialized) continue;
         // Sensors publish from loop once they have a valid reading
         const String& t = _list[i].type;
-        if (t == "dht22" || t == "ds18b20" || t == "vl53") continue;
+        if (t == "dht22" || t == "ds18b20" || t == "aht10" || t == "vl53") continue;
         _publishState(_list[i]);
     }
 }
@@ -381,7 +427,7 @@ void PeriphManager::_publishState(const Peripheral& p) {
                   ",\"g\":" + String((int)p.floatState) +
                   ",\"b\":" + String((int)p.floatState2) + "}";
 
-    } else if (p.type == "dht22") {
+    } else if (p.type == "dht22" || p.type == "aht10") {
         char buf[64];
         snprintf(buf, sizeof(buf), "{\"temp\":%.1f,\"humidity\":%.1f}",
                  p.floatState, p.floatState2);

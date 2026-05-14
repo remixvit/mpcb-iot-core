@@ -249,8 +249,9 @@ void ConfigServer::_handleGpio() {
         "{v:'neopixel',l:'NeoPixel',max:2},"
         "{v:'dht22',   l:'DHT22',   max:2},"
         "{v:'ds18b20', l:'DS18B20', max:2},"
-        "{v:'vl53',    l:'VL53 ToF',max:1},"
-        "{v:'pcf8574', l:'PCF8574', max:2}"
+        "{v:'aht10',   l:'AHT10',   max:2,i2c:1},"
+        "{v:'vl53',    l:'VL53 ToF',max:1,i2c:1},"
+        "{v:'pcf8574', l:'PCF8574', max:2,i2c:1}"
         "];"
         // ESP32-C6 Super Mini: f=forbidden (USB/Flash), w=warn (JTAG/strapping/onboard HW)
         "const PINS=["
@@ -265,8 +266,16 @@ void ConfigServer::_handleGpio() {
         "{n:20,l:'GPIO20 (RX)'},{n:21,l:'GPIO21 (TX)'},"
         "{n:22,l:'GPIO22 (SDA)'},{n:23,l:'GPIO23 (SCL)'}"
         "];"
+        "const I2C_ADDRS=[{n:0x38,l:'0x38 (осн.)'},{n:0x39,l:'0x39 (доп.)'}];"
+        "function isI2C(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.i2c);}"
+        "function i2cOpts(idx){"
+        "const used=items.filter((it,j)=>j!==idx&&isI2C(it.type)).map(x=>x.i2cAddr||0x38);"
+        "return I2C_ADDRS.map(a=>{"
+        "const busy=used.includes(a.n);"
+        "const sel=(items[idx].i2cAddr||0x38)===a.n?' selected':'';"
+        "return`<option value='${a.n}'${sel}${busy?' disabled':''}>${a.l}${busy?' (занят)':''}</option>`;}).join('');}"
         "function pinOpts(idx){"
-        "const used=items.map((it,j)=>j!==idx?it.pin:-1).filter(p=>p>=0);"
+        "const used=items.filter((it,j)=>j!==idx&&!isI2C(it.type)).map(it=>it.pin);"
         "return PINS.map(p=>{"
         "const busy=used.includes(p.n);"
         "const dis=(p.f||busy)?' disabled':'';"
@@ -274,9 +283,10 @@ void ConfigServer::_handleGpio() {
         "if(p.f)lbl+=' — запрещён';"
         "else if(busy)lbl+=' (занят)';"
         "else if(p.w)lbl+=' ⚠';"
-        "const sel=items[idx].pin===p.n?' selected':'';"
+        "const sel=!isI2C(items[idx].type)&&items[idx].pin===p.n?' selected':'';"
         "return`<option value='${p.n}'${sel}${dis}>${lbl}</option>`;}).join('');}"
         "let items=" + periphJson + ";"
+        "items=items.map(it=>Object.assign({pin:0,i2cAddr:0x38},it));"
         "function typeOpts(idx){"
         "return TYPES.map(t=>{"
         "const oth=items.filter((x,j)=>j!==idx&&x.type===t.v).length;"
@@ -284,29 +294,52 @@ void ConfigServer::_handleGpio() {
         "const lbl=t.max<=4?t.l+' ('+Math.max(0,t.max-oth)+' ост.)':t.l;"
         "const sel=items[idx].type===t.v?' selected':'';"
         "return`<option value='${t.v}'${sel}${dis}>${lbl}</option>`;}).join('');}"
+        "function onTypeChange(idx,v){"
+        "const wasI2C=isI2C(items[idx].type);const nowI2C=isI2C(v);"
+        "items[idx].type=v;"
+        "if(!wasI2C&&nowI2C){"
+        "const used=items.filter((it,j)=>j!==idx&&isI2C(it.type)).map(x=>x.i2cAddr||0x38);"
+        "const fa=I2C_ADDRS.find(a=>!used.includes(a.n));"
+        "items[idx].i2cAddr=fa?fa.n:0x38;items[idx].pin=0;"
+        "}else if(wasI2C&&!nowI2C){"
+        "const gpi=items.filter((it,j)=>j!==idx&&!isI2C(it.type));"
+        "const fp=PINS.find(p=>!p.f&&!p.w&&!gpi.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!gpi.find(x=>x.pin===p.n));"
+        "items[idx].pin=fp?fp.n:0;items[idx].i2cAddr=0;"
+        "}render();}"
         "function render(){"
         "const l=document.getElementById('list');l.innerHTML='';"
         "items.forEach((it,i)=>{"
         "const d=document.createElement('div');d.className='periph-item';"
-        "d.innerHTML=`<select onchange='items[${i}].type=this.value;render()'>${typeOpts(i)}</select>"
-        "<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>"
-        "<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>"
-        "<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`;"
+        "const i2c=isI2C(it.type);"
+        "const pctrl=i2c"
+        "?`<select style='min-width:155px' onchange='items[${i}].i2cAddr=+this.value'>${i2cOpts(i)}</select>`"
+        ":`<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>`;"
+        "d.innerHTML=`<select onchange='onTypeChange(${i},this.value)'>${typeOpts(i)}</select>`"
+        "+pctrl"
+        "+`<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>`"
+        "+`<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`;"
         "l.appendChild(d);});"
-        "const freePins=PINS.filter(p=>!p.f&&!items.find(x=>x.pin===p.n)).length;"
-        "const freeType=TYPES.some(t=>items.filter(x=>x.type===t.v).length<t.max);"
-        "const canAdd=items.length<12&&freePins>0&&freeType;"
+        "const gp=items.filter(it=>!isI2C(it.type));"
+        "const freePins=PINS.filter(p=>!p.f&&!gp.find(x=>x.pin===p.n)).length;"
+        "const i2cUsed=items.filter(it=>isI2C(it.type)).map(x=>x.i2cAddr||0x38);"
+        "const freeI2C=I2C_ADDRS.filter(a=>!i2cUsed.includes(a.n)).length;"
+        "const freeGPIOType=TYPES.filter(t=>!t.i2c).some(t=>gp.filter(x=>x.type===t.v).length<t.max);"
+        "const freeI2CType=TYPES.filter(t=>t.i2c).some(t=>items.filter(x=>x.type===t.v).length<t.max);"
+        "const canAdd=items.length<12&&((freePins>0&&freeGPIOType)||(freeI2C>0&&freeI2CType));"
         "document.getElementById('slots_info').innerHTML="
-        "`<b>${items.length}/12</b> слотов &nbsp;&bull;&nbsp; <b>${freePins}</b> пинов свободно`;"
+        "`<b>${items.length}/12</b> слотов &nbsp;&bull;&nbsp; <b>${freePins}</b> GPIO &nbsp;&bull;&nbsp; <b>${freeI2C}</b> I2C`;"
         "const ba=document.getElementById('btn_add');"
         "ba.disabled=!canAdd;ba.style.opacity=canAdd?'1':'0.4';}"
         "function addItem(){"
         "if(items.length>=12)return;"
-        "const fp=PINS.find(p=>!p.f&&!p.w&&!items.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!items.find(x=>x.pin===p.n));"
-        "if(!fp)return;"
-        "const ft=TYPES.find(t=>items.filter(x=>x.type===t.v).length<t.max);"
-        "if(!ft)return;"
-        "items.push({type:ft.v,pin:fp.n,label:''});render();}"
+        "const gpi=items.filter(it=>!isI2C(it.type));"
+        "const fp=PINS.find(p=>!p.f&&!p.w&&!gpi.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!gpi.find(x=>x.pin===p.n));"
+        "const fgt=fp?TYPES.find(t=>!t.i2c&&items.filter(x=>x.type===t.v).length<t.max):null;"
+        "if(fgt){items.push({type:fgt.v,pin:fp.n,i2cAddr:0,label:''});render();return;}"
+        "const i2cU=items.filter(it=>isI2C(it.type)).map(x=>x.i2cAddr||0x38);"
+        "const fa=I2C_ADDRS.find(a=>!i2cU.includes(a.n));"
+        "const fit=fa?TYPES.find(t=>t.i2c&&items.filter(x=>x.type===t.v).length<t.max):null;"
+        "if(fit){items.push({type:fit.v,pin:0,i2cAddr:fa.n,label:''});render();}}"
         "function savePeriph(){post('/api/gpio',{peripherals:items},d=>toast(d.ok?'Сохранено':d.err||'Ошибка',d.ok));}"
         "render();"
 
@@ -314,7 +347,7 @@ void ConfigServer::_handleGpio() {
         "const EVENTS=[{v:'pressed',l:'нажата'},{v:'released',l:'отпущена'},{v:'any',l:'любое'}];"
         "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'}"
         ",{v:'off',l:'выключить'},{v:'pulse',l:'импульс'}];"
-        "const TRIGGER_TYPES=['button','analog','dht22','ds18b20','vl53'];"
+        "const TRIGGER_TYPES=['button','analog','dht22','ds18b20','aht10','vl53'];"
         "const TARGET_TYPES=['relay','pwm','neopixel','pcf8574'];"
         "let rules=" + rulesJson + ";"
 
@@ -418,32 +451,40 @@ void ConfigServer::_handleSaveGpio() {
         return;
     }
 
-    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","vl53","pcf8574"};
-    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,     1,        2};
-    static const uint8_t tCount    = 9;
+    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","pcf8574"};
+    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,     1,        2};
+    static const uint8_t tCount    = 10;
+    static const char*   i2cTypes[] = {"aht10","vl53","pcf8574"};
+    static const uint8_t i2cCount   = 3;
     static const uint8_t forbidden[] = {12, 13, 18, 19};
 
     uint8_t cnt[tCount] = {};
     bool    usedPin[24] = {};
 
     for (JsonObject obj : arr) {
-        uint8_t pin = obj["pin"] | 255;
-        for (uint8_t fp : forbidden) {
-            if (pin == fp) {
-                _server.send(400, "application/json",
-                    "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " запрещён\"}");
-                return;
-            }
-        }
-        if (pin < 24) {
-            if (usedPin[pin]) {
-                _server.send(400, "application/json",
-                    "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " занят\"}");
-                return;
-            }
-            usedPin[pin] = true;
-        }
         String type = obj["type"].as<String>();
+        bool isI2C = false;
+        for (uint8_t k = 0; k < i2cCount; k++) if (type == i2cTypes[k]) { isI2C = true; break; }
+
+        if (!isI2C) {
+            uint8_t pin = obj["pin"] | 255;
+            for (uint8_t fp : forbidden) {
+                if (pin == fp) {
+                    _server.send(400, "application/json",
+                        "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " запрещён\"}");
+                    return;
+                }
+            }
+            if (pin < 24) {
+                if (usedPin[pin]) {
+                    _server.send(400, "application/json",
+                        "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " занят\"}");
+                    return;
+                }
+                usedPin[pin] = true;
+            }
+        }
+
         for (uint8_t i = 0; i < tCount; i++) {
             if (type == tNames[i]) {
                 if (++cnt[i] > tLimits[i]) {

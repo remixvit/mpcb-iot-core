@@ -36,6 +36,7 @@ struct Rule {
 struct Peripheral {
     String  type;
     uint8_t pin      = 0;
+    uint8_t i2cAddr  = 0;    // I2C address (aht10, vl53, pcf8574)
     String  label;
     String  key;          // sanitized label → MQTT path component
     String  topicSet;     // subscribe (actuators)
