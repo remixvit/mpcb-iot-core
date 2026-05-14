@@ -135,12 +135,16 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
         }
         bool cur = !digitalRead(p.pin);  // pullup: LOW = pressed
         if (cur != p.prevBool) {
-            p.lastReadMs = now;
-            p.boolState  = cur;
             p.prevBool   = cur;
-            _publishState(p);
-            _checkRules(p.key, cur ? "pressed" : "released");
-            _checkRules(p.key, "any");
+            p.pulseEndMs = now + 30;  // restart 30ms debounce window on any bounce
+        } else if (p.pulseEndMs && now >= p.pulseEndMs) {
+            p.pulseEndMs = 0;
+            if (cur != p.boolState) {
+                p.boolState = cur;
+                _publishState(p);
+                _checkRules(p.key, cur ? "pressed" : "released");
+                _checkRules(p.key, "any");
+            }
         }
 
     } else if (p.type == "relay") {
