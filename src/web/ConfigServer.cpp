@@ -221,9 +221,9 @@ void ConfigServer::_handleGpio() {
         // ── Peripherals card ────────────────────────────────────────────────
         "<div class='card'>"
         "<h2>Периферия (GPIO)</h2>"
-        "<p style='font-size:.85rem;color:#888;margin-bottom:16px'>Устройства, подключённые к пинам ESP32</p>"
+        "<p id='slots_info' style='font-size:.85rem;color:#888;margin-bottom:16px'>Загрузка...</p>"
         "<div id='list' class='periph-list'></div>"
-        "<button class='sec' onclick='addItem()'>+ Добавить</button>"
+        "<button id='btn_add' class='sec' onclick='addItem()'>+ Добавить</button>"
         "<button onclick='savePeriph()' style='margin-left:8px'>Сохранить</button>"
         "</div>"
 
@@ -241,9 +241,17 @@ void ConfigServer::_handleGpio() {
         "<script>"
         "function san(s){let o='';for(let c of (s||'').toLowerCase()){"
         "if(/[a-z0-9]/.test(c))o+=c;else if(c===' '||c==='-')o+='_';}return o;}"
-        "const TYPES=[{v:'relay',l:'Реле'},{v:'button',l:'Кнопка'}"
-        ",{v:'dht22',l:'DHT22'},{v:'ds18b20',l:'DS18B20'}"
-        ",{v:'neopixel',l:'NeoPixel'},{v:'analog',l:'Аналог'},{v:'pwm',l:'PWM'}];"
+        "const TYPES=["
+        "{v:'relay',   l:'Реле',    max:8},"
+        "{v:'button',  l:'Кнопка',  max:8},"
+        "{v:'analog',  l:'Аналог',  max:4},"
+        "{v:'pwm',     l:'PWM',     max:4},"
+        "{v:'neopixel',l:'NeoPixel',max:2},"
+        "{v:'dht22',   l:'DHT22',   max:2},"
+        "{v:'ds18b20', l:'DS18B20', max:2},"
+        "{v:'vl53',    l:'VL53 ToF',max:1},"
+        "{v:'pcf8574', l:'PCF8574', max:2}"
+        "];"
         // ESP32-C6 Super Mini: f=forbidden (USB/Flash), w=warn (JTAG/strapping/onboard HW)
         "const PINS=["
         "{n:0,l:'GPIO0 (ADC)'},{n:1,l:'GPIO1 (ADC)'},{n:2,l:'GPIO2 (ADC)'},{n:3,l:'GPIO3 (ADC)'},"
@@ -269,20 +277,37 @@ void ConfigServer::_handleGpio() {
         "const sel=items[idx].pin===p.n?' selected':'';"
         "return`<option value='${p.n}'${sel}${dis}>${lbl}</option>`;}).join('');}"
         "let items=" + periphJson + ";"
+        "function typeOpts(idx){"
+        "return TYPES.map(t=>{"
+        "const oth=items.filter((x,j)=>j!==idx&&x.type===t.v).length;"
+        "const dis=oth>=t.max?' disabled':'';"
+        "const lbl=t.max<=4?t.l+' ('+Math.max(0,t.max-oth)+' ост.)':t.l;"
+        "const sel=items[idx].type===t.v?' selected':'';"
+        "return`<option value='${t.v}'${sel}${dis}>${lbl}</option>`;}).join('');}"
         "function render(){"
         "const l=document.getElementById('list');l.innerHTML='';"
         "items.forEach((it,i)=>{"
         "const d=document.createElement('div');d.className='periph-item';"
-        "d.innerHTML=`<select onchange='items[${i}].type=this.value'>${TYPES.map(t=>"
-        "`<option value='${t.v}'${it.type===t.v?' selected':''}>${t.l}</option>`).join('')}</select>"
+        "d.innerHTML=`<select onchange='items[${i}].type=this.value;render()'>${typeOpts(i)}</select>"
         "<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>"
         "<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>"
         "<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`;"
-        "l.appendChild(d);});}"
+        "l.appendChild(d);});"
+        "const freePins=PINS.filter(p=>!p.f&&!items.find(x=>x.pin===p.n)).length;"
+        "const freeType=TYPES.some(t=>items.filter(x=>x.type===t.v).length<t.max);"
+        "const canAdd=items.length<12&&freePins>0&&freeType;"
+        "document.getElementById('slots_info').innerHTML="
+        "`<b>${items.length}/12</b> слотов &nbsp;&bull;&nbsp; <b>${freePins}</b> пинов свободно`;"
+        "const ba=document.getElementById('btn_add');"
+        "ba.disabled=!canAdd;ba.style.opacity=canAdd?'1':'0.4';}"
         "function addItem(){"
+        "if(items.length>=12)return;"
         "const fp=PINS.find(p=>!p.f&&!p.w&&!items.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!items.find(x=>x.pin===p.n));"
-        "items.push({type:'relay',pin:fp?fp.n:0,label:''});render();}"
-        "function savePeriph(){post('/api/gpio',{peripherals:items},d=>toast(d.ok?'Сохранено':'Ошибка',d.ok));}"
+        "if(!fp)return;"
+        "const ft=TYPES.find(t=>items.filter(x=>x.type===t.v).length<t.max);"
+        "if(!ft)return;"
+        "items.push({type:ft.v,pin:fp.n,label:''});render();}"
+        "function savePeriph(){post('/api/gpio',{peripherals:items},d=>toast(d.ok?'Сохранено':d.err||'Ошибка',d.ok));}"
         "render();"
 
         // rules
@@ -376,9 +401,53 @@ void ConfigServer::_handleSaveMqtt() {
 void ConfigServer::_handleSaveGpio() {
     JsonDocument doc;
     if (deserializeJson(doc, _server.arg("plain")) != DeserializationError::Ok) {
-        _server.send(400, "application/json", "{\"ok\":false}");
+        _server.send(400, "application/json", "{\"ok\":false,\"err\":\"JSON\"}");
         return;
     }
+    JsonArray arr = doc["peripherals"].as<JsonArray>();
+    if (!arr || arr.size() > 12) {
+        _server.send(400, "application/json", "{\"ok\":false,\"err\":\"max 12 peripherals\"}");
+        return;
+    }
+
+    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","vl53","pcf8574"};
+    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,     1,        2};
+    static const uint8_t tCount    = 9;
+    static const uint8_t forbidden[] = {12, 13, 18, 19};
+
+    uint8_t cnt[tCount] = {};
+    bool    usedPin[24] = {};
+
+    for (JsonObject obj : arr) {
+        uint8_t pin = obj["pin"] | 255;
+        for (uint8_t fp : forbidden) {
+            if (pin == fp) {
+                _server.send(400, "application/json",
+                    "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " запрещён\"}");
+                return;
+            }
+        }
+        if (pin < 24) {
+            if (usedPin[pin]) {
+                _server.send(400, "application/json",
+                    "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " занят\"}");
+                return;
+            }
+            usedPin[pin] = true;
+        }
+        String type = obj["type"].as<String>();
+        for (uint8_t i = 0; i < tCount; i++) {
+            if (type == tNames[i]) {
+                if (++cnt[i] > tLimits[i]) {
+                    _server.send(400, "application/json",
+                        "{\"ok\":false,\"err\":\"" + type + ": макс. " + String(tLimits[i]) + "\"}");
+                    return;
+                }
+                break;
+            }
+        }
+    }
+
     String out;
     serializeJson(doc["peripherals"], out);
     _storage.savePeripherals(out);
