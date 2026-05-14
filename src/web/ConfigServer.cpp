@@ -313,6 +313,7 @@ void ConfigServer::_handleGpio() {
         "const i2c=isI2C(it.type);"
         "const pctrl=i2c"
         "?`<select style='min-width:155px' onchange='items[${i}].i2cAddr=+this.value'>${i2cOpts(i)}</select>`"
+        "+`<span style='font-size:.75rem;color:#8e8e93;white-space:nowrap;background:#1c1c1e;padding:3px 8px;border-radius:6px'>SDA&#x2192;22 &nbsp; SCL&#x2192;23</span>`"
         ":`<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>`;"
         "d.innerHTML=`<select onchange='onTypeChange(${i},this.value)'>${typeOpts(i)}</select>`"
         "+pctrl"
