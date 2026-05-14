@@ -48,8 +48,10 @@ struct Peripheral {
     float    floatState2 = 0.0f;  // second sensor value (humidity)
     bool     prevBool    = false; // for edge detection (button)
     uint32_t lastReadMs  = 0;
-    uint32_t pulseEndMs  = 0;    // nonzero = pulse active, auto-off at this millis()
+    uint32_t pulseEndMs  = 0;    // relay: pulse timer; button: debounce timer
     bool     initialized = false;
+    void*    sensorObj   = nullptr;  // DHT*, DallasTemperature*
+    void*    sensorObj2  = nullptr;  // OneWire* (must outlive DallasTemperature)
 };
 
 class PeriphManager {

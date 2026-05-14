@@ -2,6 +2,16 @@
 #include "../MpcbIotCore.h"
 #include <WiFi.h>
 
+#if __has_include(<DHT.h>)
+  #include <DHT.h>
+  #define MPCB_HAS_DHT
+#endif
+#if __has_include(<DallasTemperature.h>)
+  #include <OneWire.h>
+  #include <DallasTemperature.h>
+  #define MPCB_HAS_DS18B20
+#endif
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 String PeriphManager::_sanitize(const String& s) {
@@ -103,14 +113,32 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         p.initialized = true;
 
     } else if (p.type == "dht22") {
-        // Stub — add adafruit/DHT sensor library to your project
+#ifdef MPCB_HAS_DHT
+        DHT* dht = new DHT(p.pin, DHT22);
+        dht->begin();
+        p.sensorObj   = dht;
+        p.lastReadMs  = millis() - 29000;  // first read after ~1s
+        p.initialized = true;
+        Log.log("Periph", "dht22 init pin=" + String(p.pin));
+#else
         Log.log("Periph", "dht22: add 'adafruit/DHT sensor library' to lib_deps");
         p.initialized = false;
+#endif
 
     } else if (p.type == "ds18b20") {
-        // Stub — add milesburton/DallasTemperature to your project
+#ifdef MPCB_HAS_DS18B20
+        OneWire*          ow = new OneWire(p.pin);
+        DallasTemperature* dt = new DallasTemperature(ow);
+        dt->begin();
+        p.sensorObj   = dt;
+        p.sensorObj2  = ow;
+        p.lastReadMs  = millis() - 29000;  // first read after ~1s
+        p.initialized = true;
+        Log.log("Periph", "ds18b20 init pin=" + String(p.pin));
+#else
         Log.log("Periph", "ds18b20: add 'milesburton/DallasTemperature' to lib_deps");
         p.initialized = false;
+#endif
 
     } else {
         Log.log("Periph", "Unknown type: " + p.type);
@@ -164,6 +192,39 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             p.floatState  = raw * (3.3f / 4095.0f);  // 12-bit ADC → voltage
             _publishState(p);
         }
+    } else if (p.type == "dht22") {
+#ifdef MPCB_HAS_DHT
+        if (now - p.lastReadMs >= 30000) {
+            p.lastReadMs = now;
+            float t = ((DHT*)p.sensorObj)->readTemperature();
+            float h = ((DHT*)p.sensorObj)->readHumidity();
+            if (!isnan(t) && !isnan(h)) {
+                p.floatState  = t;
+                p.floatState2 = h;
+                _publishState(p);
+                Log.log("Periph", p.key + " t=" + String(t, 1) + " h=" + String(h, 1));
+            } else {
+                Log.log("Periph", p.key + " read failed");
+            }
+        }
+#endif
+
+    } else if (p.type == "ds18b20") {
+#ifdef MPCB_HAS_DS18B20
+        if (now - p.lastReadMs >= 30000) {
+            p.lastReadMs = now;
+            DallasTemperature* dt = (DallasTemperature*)p.sensorObj;
+            dt->requestTemperatures();
+            float t = dt->getTempCByIndex(0);
+            if (t != DEVICE_DISCONNECTED_C) {
+                p.floatState = t;
+                _publishState(p);
+                Log.log("Periph", p.key + " t=" + String(t, 1));
+            } else {
+                Log.log("Periph", p.key + " not found on bus");
+            }
+        }
+#endif
     }
     // pwm / neopixel: event-driven only, nothing to poll
 }
@@ -171,12 +232,14 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::onMqttConnected() {
-    // Subscribe to ALL topics for this device — helps debug message delivery
-    _iot->subscribe("mpcb/devices/" + _deviceId + "/#");
+    _iot->subscribe("mpcb/devices/" + _deviceId + "/+/set");
     _publishConfig();
-    // Publish current state of all peripherals (after config — per spec order)
     for (uint8_t i = 0; i < _count; i++) {
-        if (_list[i].initialized) _publishState(_list[i]);
+        if (!_list[i].initialized) continue;
+        // Sensors publish from loop once they have a valid reading
+        const String& t = _list[i].type;
+        if (t == "dht22" || t == "ds18b20" || t == "vl53") continue;
+        _publishState(_list[i]);
     }
 }
 
