@@ -129,9 +129,13 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
     uint32_t now = millis();
 
     if (p.type == "button") {
+        if (now - p.lastReadMs >= 3000) {
+            p.lastReadMs = now;
+            Log.log("Periph", p.key + " pin=" + p.pin + " raw=" + digitalRead(p.pin));
+        }
         bool cur = !digitalRead(p.pin);  // pullup: LOW = pressed
-        if (cur != p.prevBool && (millis() - p.lastReadMs) >= 10) {
-            p.lastReadMs = millis();
+        if (cur != p.prevBool) {
+            p.lastReadMs = now;
             p.boolState  = cur;
             p.prevBool   = cur;
             _publishState(p);
