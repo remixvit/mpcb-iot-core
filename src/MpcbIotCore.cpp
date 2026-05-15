@@ -162,6 +162,8 @@ void MpcbIotCore::_startConfigServer() {
     }
 
     _configServer = new ConfigServer(_storage);
+    if (_dashState) _configServer->onStateRequest(_dashState);
+    if (_dashCmd)   _configServer->onCmd(_dashCmd);
     _configServer->begin();
     Log.log("IoT", "Config server: http://" + WiFi.localIP().toString());
     _setState(IotState::CONFIG_SERVER);

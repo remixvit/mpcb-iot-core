@@ -17,7 +17,7 @@ class MpcbIotCore;
 // ds18b20  — temp sensor (needs DallasTemperature), publishes every 30s
 // ─────────────────────────────────────────────────────────────────────────────
 
-static constexpr uint8_t MAX_PERIPHERALS = 12;
+static constexpr uint8_t MAX_PERIPHERALS = 24;
 static constexpr uint8_t MAX_RULES       = 20;
 
 // ─── Automation rule ─────────────────────────────────────────────────────────
@@ -38,17 +38,31 @@ struct Rule {
 struct Peripheral {
     String  type;
     uint8_t pin      = 0;
-    uint8_t i2cAddr  = 0;    // I2C address (aht10, vl53, pcf8574)
+    uint8_t i2cAddr  = 0;    // I2C address (aht10, vl53, pcf_relay, pcf_button)
+    uint8_t channel  = 0;    // PCF8574 channel (0–7)
     String  label;
     String  key;          // sanitized label → MQTT path component
     String  topicSet;     // subscribe (actuators)
     String  topicState;   // publish
+
+    // Analog calibration
+    uint8_t calMode   = 0;         // 0=raw, 1=linear, 2=thermistor NTC
+    float   calRawMin = 0.0f;      // linear: ADC raw min
+    float   calRawMax = 4095.0f;   // linear: ADC raw max
+    float   calValMin = 0.0f;      // linear: output min
+    float   calValMax = 100.0f;    // linear: output max
+    float   calRRef   = 10000.0f;  // thermistor: reference resistor Ω
+    float   calBeta   = 3950.0f;   // thermistor: Beta coefficient
+    float   calR25    = 10000.0f;  // thermistor: R at 25°C
+    String  calUnit;               // unit string (e.g. "°C", "%")
+    float   calOffset = 0.0f;      // tare offset — subtracted from converted
 
     // Runtime state
     bool     boolState   = false;
     int32_t  intState    = 0;
     float    floatState  = 0.0f;
     float    floatState2 = 0.0f;  // second sensor value (humidity)
+    float    converted   = 0.0f;  // calibrated analog value
     bool     prevBool    = false; // for edge detection (button)
     uint32_t lastReadMs  = 0;
     uint32_t pulseEndMs  = 0;    // relay: pulse timer; button: debounce timer
@@ -74,6 +88,12 @@ public:
 
     uint8_t count() const { return _count; }
 
+    // Returns JSON array of all peripheral states (for dashboard)
+    String getStateJson() const;
+
+    // Apply command locally (from web UI) and publish state via MQTT
+    void handleLocalCmd(const String& key, const String& payload);
+
 private:
     void _initPeriph(Peripheral& p);
     void _loopPeriph(Peripheral& p);
@@ -86,10 +106,14 @@ private:
 
     static String _sanitize(const String& s);
 
-    Peripheral   _list[MAX_PERIPHERALS];
-    uint8_t      _count      = 0;
-    Rule         _rules[MAX_RULES];
-    uint8_t      _rulesCount = 0;
-    MpcbIotCore* _iot        = nullptr;
-    String       _deviceId;
+    Peripheral    _list[MAX_PERIPHERALS];
+    uint8_t       _count      = 0;
+    Rule          _rules[MAX_RULES];
+    uint8_t       _rulesCount = 0;
+    MpcbIotCore*  _iot        = nullptr;
+    String        _deviceId;
+    ConfigStorage* _storage   = nullptr;
+
+    // PCF8574 shared objects — indexed by (i2cAddr - 0x20), max 8 chips
+    void*         _pcfObjs[8] = {};
 };

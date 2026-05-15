@@ -34,6 +34,10 @@ public:
     void onMqttMessage(MqttCallback cb)     { _onMqtt      = cb; }
     void onMqttConnected(ConnectedCallback cb) { _onConnected = cb; }
 
+    // Dashboard wiring — call before begin() or after (applied on next configServer start)
+    void onDashState(ConfigServer::StateProvider cb) { _dashState = cb; }
+    void onDashCmd(ConfigServer::CmdHandler cb)      { _dashCmd   = cb; }
+
     // MQTT
     bool publish(const String& topic, const String& payload, bool retain = false);
     bool subscribe(const String& topic);
@@ -74,7 +78,9 @@ private:
     bool          _wifiScanPending   = false;
     bool          _closeApRequested  = false;
 
-    StateCallback     _onState;
-    MqttCallback      _onMqtt;
-    ConnectedCallback _onConnected;
+    StateCallback          _onState;
+    MqttCallback           _onMqtt;
+    ConnectedCallback      _onConnected;
+    ConfigServer::StateProvider _dashState;
+    ConfigServer::CmdHandler    _dashCmd;
 };

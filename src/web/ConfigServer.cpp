@@ -1,5 +1,6 @@
 #include "ConfigServer.h"
 #include <WiFi.h>
+#include <Wire.h>
 #include <ArduinoJson.h>
 #include <Update.h>
 #include "../log/RingLog.h"
@@ -72,6 +73,7 @@ static String _page(const String& title, const String& activeTab, const String& 
         "<a href='/' "     + String(activeTab=="home"?"class='active'":"") + ">&#x2302; Устройство</a>"
         "<a href='/wifi' " + String(activeTab=="wifi"?"class='active'":"") + ">&#x1F4F6; WiFi</a>"
         "<a href='/mqtt' " + String(activeTab=="mqtt"?"class='active'":"") + ">&#x1F4E1; MQTT</a>"
+        "<a href='/dash' " + String(activeTab=="dash"?"class='active'":"") + ">&#x1F4CA; Статус</a>"
         "<a href='/gpio' " + String(activeTab=="gpio"?"class='active'":"") + ">&#x26A1; GPIO</a>"
         "<a href='/logs' " + String(activeTab=="logs"?"class='active'":"") + ">&#x1F4CB; Логи</a>"
         "<a href='/ota' "  + String(activeTab=="ota" ?"class='active'":"") + ">&#x1F4E6; OTA</a>"
@@ -108,6 +110,10 @@ void ConfigServer::begin() {
         ESP.restart();
     });
     _server.on("/api/status",   [this](){ _handleStatus(); });
+    _server.on("/api/i2c-scan", [this](){ _handleI2cScan(); });
+    _server.on("/dash",         [this](){ _handleDash(); });
+    _server.on("/api/state",    [this](){ _handleApiState(); });
+    _server.on("/api/cmd",      HTTP_POST, [this](){ _handleApiCmd(); });
     _server.on("/api/log-text", [this](){
         _server.send(200, "text/plain; charset=utf-8", Log.toText());
     });
@@ -225,6 +231,14 @@ void ConfigServer::_handleGpio() {
         "<div id='list' class='periph-list'></div>"
         "<button id='btn_add' class='sec' onclick='addItem()'>+ Добавить</button>"
         "<button onclick='savePeriph()' style='margin-left:8px'>Сохранить</button>"
+        "<button class='sec' onclick='reboot()' style='margin-left:8px'>&#x21BA; Перезагрузить</button>"
+        "<p id='reboot_hint' style='display:none;margin-top:10px;font-size:.82rem;"
+        "color:#f4a261;background:rgba(244,162,97,.1);padding:8px 12px;border-radius:8px'>"
+        "&#x26A0; Изменения сохранены — перезагрузите устройство для применения</p>"
+        "<hr style='border:none;border-top:1px solid #333;margin:16px 0'>"
+        "<h2 style='margin-bottom:8px'>&#x1F50D; I2C сканер</h2>"
+        "<button class='sec' onclick='scanI2c()' style='margin-top:0'>Сканировать шину</button>"
+        "<div id='i2c_result' style='margin-top:10px;font-size:.85rem;color:#8e8e93'></div>"
         "</div>"
 
         // ── Rules card ──────────────────────────────────────────────────────
@@ -242,32 +256,63 @@ void ConfigServer::_handleGpio() {
         "function san(s){let o='';for(let c of (s||'').toLowerCase()){"
         "if(/[a-z0-9]/.test(c))o+=c;}return o;}"
         "const TYPES=["
-        "{v:'relay',   l:'Реле',    max:8},"
-        "{v:'button',  l:'Кнопка',  max:8},"
-        "{v:'analog',  l:'Аналог',  max:4},"
-        "{v:'pwm',     l:'PWM',     max:4},"
-        "{v:'neopixel',l:'NeoPixel',max:2},"
-        "{v:'dht22',   l:'DHT22',   max:2},"
-        "{v:'ds18b20', l:'DS18B20', max:2},"
-        "{v:'aht10',   l:'AHT10',   max:2,i2c:1,addrs:[{n:0x38,l:'0x38'},{n:0x39,l:'0x39'}]},"
-        "{v:'vl53',    l:'VL53 ToF',max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
-        "{v:'pcf8574', l:'PCF8574', max:2,i2c:1,addrs:[{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'}]}"
+        "{v:'relay',     l:'Реле',       max:8},"
+        "{v:'button',    l:'Кнопка',     max:8},"
+        "{v:'analog',    l:'Аналог',     max:4},"
+        "{v:'pwm',       l:'PWM',        max:4},"
+        "{v:'neopixel',  l:'NeoPixel',   max:2},"
+        "{v:'dht22',     l:'DHT22',      max:2},"
+        "{v:'ds18b20',   l:'DS18B20',    max:2},"
+        "{v:'aht10',     l:'AHT10',      max:2,i2c:1,addrs:[{n:0x38,l:'0x38'},{n:0x39,l:'0x39'}]},"
+        "{v:'vl53',      l:'VL53 ToF',   max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
+        "{v:'pcf_relay', l:'PCF Реле',   max:16,i2c:1,pcf:1,addrs:["
+        "{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'},"
+        "{n:0x24,l:'0x24'},{n:0x25,l:'0x25'},{n:0x26,l:'0x26'},{n:0x27,l:'0x27'}]},"
+        "{v:'pcf_button',l:'PCF Кнопка', max:16,i2c:1,pcf:1,addrs:["
+        "{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'},"
+        "{n:0x24,l:'0x24'},{n:0x25,l:'0x25'},{n:0x26,l:'0x26'},{n:0x27,l:'0x27'}]}"
         "];"
-        // ESP32-C6 Super Mini: f=forbidden (USB/Flash), w=warn (JTAG/strapping/onboard HW)
+        // ESP32-C6 Super Mini (FH4 — embedded flash, GPIO18/19 free)
+        // f=forbidden (USB), w=warn (JTAG/strapping/onboard HW)
         "const PINS=["
         "{n:0,l:'GPIO0 (ADC)'},{n:1,l:'GPIO1 (ADC)'},{n:2,l:'GPIO2 (ADC)'},{n:3,l:'GPIO3 (ADC)'},"
-        "{n:4,l:'GPIO4 (ADC/SCK)',w:1},{n:5,l:'GPIO5 (MISO)',w:1},"
-        "{n:6,l:'GPIO6 (MOSI)',w:1},{n:7,l:'GPIO7 (SS)',w:1},"
+        "{n:4,l:'GPIO4 (ADC)',w:1},{n:5,l:'GPIO5',w:1},"
+        "{n:6,l:'GPIO6',w:1},{n:7,l:'GPIO7',w:1},"
         "{n:8,l:'GPIO8 (WS2812)',w:1},{n:9,l:'GPIO9 (BOOT)',w:1},"
         "{n:12,l:'GPIO12 (USB-)',f:1},{n:13,l:'GPIO13 (USB+)',f:1},"
         "{n:14,l:'GPIO14'},"
         "{n:15,l:'GPIO15 (LED)',w:1},"
-        "{n:18,l:'GPIO18 (Flash)',f:1},{n:19,l:'GPIO19 (Flash)',f:1},"
+        "{n:18,l:'GPIO18 (SCL)'},{n:19,l:'GPIO19 (SDA)'},"
         "{n:20,l:'GPIO20 (RX)'},{n:21,l:'GPIO21 (TX)'},"
-        "{n:22,l:'GPIO22 (SDA)'},{n:23,l:'GPIO23 (SCL)'}"
+        "{n:22,l:'GPIO22 (SDA alt)',w:1},{n:23,l:'GPIO23 (SCL alt)',w:1}"
         "];"
-        "function isI2C(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.i2c);}"
+        "function isPcf(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.pcf);}"
+        "function isI2C(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.i2c&&!t.pcf);}"
         "function addrsFor(type){const t=TYPES.find(x=>x.v===type);return(t&&t.addrs)||[];}"
+        // PCF8574 address selector — disables full chips and enforces max 2 distinct addresses
+        "function pcfI2cOpts(idx){"
+        "const oth=items.filter((it,j)=>j!==idx&&isPcf(it.type));"
+        "const addrMap={};oth.forEach(it=>{"
+        "if(!addrMap[it.i2cAddr])addrMap[it.i2cAddr]=new Set();"
+        "addrMap[it.i2cAddr].add(it.channel);});"
+        "const usedAddrs=Object.keys(addrMap).map(Number);"
+        "return addrsFor(items[idx].type).map(a=>{"
+        "const isNew=!usedAddrs.includes(a.n);"
+        "const full=addrMap[a.n]&&addrMap[a.n].size>=8;"
+        "const tooMany=isNew&&usedAddrs.length>=2;"
+        "const dis=(full||tooMany)?' disabled':'';"
+        "const sel=items[idx].i2cAddr===a.n?' selected':'';"
+        "let lbl=a.l;"
+        "if(full)lbl+=' (полный)';else if(tooMany)lbl+=' (лимит)';"
+        "return`<option value='${a.n}'${sel}${dis}>${lbl}</option>`;}).join('');}"
+        // PCF8574 channel selector (0–7), disables channels already taken at same address
+        "function pcfChannelOpts(idx){"
+        "const usedCh=new Set(items.filter((it,j)=>j!==idx&&isPcf(it.type)&&it.i2cAddr===items[idx].i2cAddr).map(x=>x.channel));"
+        "return[0,1,2,3,4,5,6,7].map(ch=>{"
+        "const busy=usedCh.has(ch);"
+        "const sel=items[idx].channel===ch?' selected':'';"
+        "const dis=busy?' disabled':'';"
+        "return`<option value='${ch}'${sel}${dis}>CH${ch}${busy?' (занят)':''}</option>`;}).join('');}"
         "function i2cOpts(idx){"
         "const myAddrs=addrsFor(items[idx].type);"
         "const used=items.filter((it,j)=>j!==idx&&isI2C(it.type)).map(x=>x.i2cAddr);"
@@ -276,7 +321,7 @@ void ConfigServer::_handleGpio() {
         "const sel=items[idx].i2cAddr===a.n?' selected':'';"
         "return`<option value='${a.n}'${sel}${busy?' disabled':''}>${a.l}${busy?' (занят)':''}</option>`;}).join('');}"
         "function pinOpts(idx){"
-        "const used=items.filter((it,j)=>j!==idx&&!isI2C(it.type)).map(it=>it.pin);"
+        "const used=items.filter((it,j)=>j!==idx&&!isI2C(it.type)&&!isPcf(it.type)).map(it=>it.pin);"
         "return PINS.map(p=>{"
         "const busy=used.includes(p.n);"
         "const dis=(p.f||busy)?' disabled':'';"
@@ -287,7 +332,9 @@ void ConfigServer::_handleGpio() {
         "const sel=!isI2C(items[idx].type)&&items[idx].pin===p.n?' selected':'';"
         "return`<option value='${p.n}'${sel}${dis}>${lbl}</option>`;}).join('');}"
         "let items=" + periphJson + ";"
-        "items=items.map(it=>Object.assign({pin:0,i2cAddr:0x38},it));"
+        "items=items.map(it=>Object.assign({pin:0,i2cAddr:0x38,channel:0,"
+        "calMode:0,calRawMin:0,calRawMax:4095,calValMin:0,calValMax:100,"
+        "calRRef:10000,calBeta:3950,calR25:10000,calUnit:''},it));"
         "function typeOpts(idx){"
         "return TYPES.map(t=>{"
         "const oth=items.filter((x,j)=>j!==idx&&x.type===t.v).length;"
@@ -296,65 +343,167 @@ void ConfigServer::_handleGpio() {
         "const sel=items[idx].type===t.v?' selected':'';"
         "return`<option value='${t.v}'${sel}${dis}>${lbl}</option>`;}).join('');}"
         "function onTypeChange(idx,v){"
-        "const wasI2C=isI2C(items[idx].type);const nowI2C=isI2C(v);"
+        "const wasPcf=isPcf(items[idx].type);const wasI2C=isI2C(items[idx].type);"
+        "const nowPcf=isPcf(v);const nowI2C=isI2C(v);"
         "items[idx].type=v;"
-        "if(nowI2C){"
+        "if(nowPcf){"
+        // Find free addr+channel for pcf_ type
+        "const oth=items.filter((it,j)=>j!==idx&&isPcf(it.type));"
+        "const am={};oth.forEach(it=>{if(!am[it.i2cAddr])am[it.i2cAddr]=new Set();am[it.i2cAddr].add(it.channel);});"
+        "const ua=Object.keys(am).map(Number);"
+        "let fa=items[idx].i2cAddr||0x20,fc=0;"
+        "const cc=am[fa]||new Set();"
+        "const frCh=[0,1,2,3,4,5,6,7].find(c=>!cc.has(c));"
+        "if(frCh!==undefined){fc=frCh;}else{"
+        "let found=false;"
+        "for(const a of addrsFor(v)){"
+        "if(!am[a.n]){if(ua.length<2){fa=a.n;fc=0;found=true;break;}}"
+        "else if(am[a.n].size<8){fa=a.n;fc=[0,1,2,3,4,5,6,7].find(c=>!am[a.n].has(c));found=true;break;}}"
+        "if(!found){fa=addrsFor(v)[0].n;fc=0;}}"
+        "items[idx].i2cAddr=fa;items[idx].channel=fc;"
+        "if(!wasI2C&&!wasPcf)items[idx].pin=0;"
+        "}else if(nowI2C){"
         "const used=items.filter((it,j)=>j!==idx&&isI2C(it.type)).map(x=>x.i2cAddr);"
         "const myAddrs=addrsFor(v);"
         "const fa=myAddrs.find(a=>!used.includes(a.n));"
         "items[idx].i2cAddr=fa?fa.n:(myAddrs[0]?myAddrs[0].n:0x38);"
-        "if(!wasI2C)items[idx].pin=0;"
-        "}else if(wasI2C&&!nowI2C){"
-        "const gpi=items.filter((it,j)=>j!==idx&&!isI2C(it.type));"
+        "if(!wasI2C&&!wasPcf)items[idx].pin=0;"
+        "}else if((wasI2C||wasPcf)&&!nowI2C&&!nowPcf){"
+        "const gpi=items.filter((it,j)=>j!==idx&&!isI2C(it.type)&&!isPcf(it.type));"
         "const fp=PINS.find(p=>!p.f&&!p.w&&!gpi.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!gpi.find(x=>x.pin===p.n));"
-        "items[idx].pin=fp?fp.n:0;items[idx].i2cAddr=0;"
+        "items[idx].pin=fp?fp.n:0;items[idx].i2cAddr=0;items[idx].channel=0;"
         "}render();}"
         "function render(){"
         "const l=document.getElementById('list');l.innerHTML='';"
         "items.forEach((it,i)=>{"
         "const d=document.createElement('div');d.className='periph-item';"
-        "const i2c=isI2C(it.type);"
-        "const pctrl=i2c"
-        "?`<select style='min-width:155px' onchange='items[${i}].i2cAddr=+this.value'>${i2cOpts(i)}</select>`"
-        "+`<span style='font-size:.75rem;color:#8e8e93;white-space:nowrap;background:#1c1c1e;padding:3px 8px;border-radius:6px'>SDA&#x2192;22 &nbsp; SCL&#x2192;23</span>`"
-        ":`<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>`;"
+        "const pcf=isPcf(it.type);const i2c=isI2C(it.type);"
+        "let pctrl;"
+        "if(pcf){"
+        "pctrl=`<select style='min-width:90px' onchange='items[${i}].i2cAddr=+this.value;render()'>${pcfI2cOpts(i)}</select>`"
+        "+`<select style='min-width:80px' onchange='items[${i}].channel=+this.value;render()'>${pcfChannelOpts(i)}</select>`;"
+        "}else if(i2c){"
+        "pctrl=`<select style='min-width:155px' onchange='items[${i}].i2cAddr=+this.value'>${i2cOpts(i)}</select>`"
+        "+`<span style='font-size:.75rem;color:#8e8e93;white-space:nowrap;background:#1c1c1e;padding:3px 8px;border-radius:6px'>SDA&#x2192;19 &nbsp; SCL&#x2192;18</span>`;"
+        "}else{"
+        "pctrl=`<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>`;"
+        "}"
+        // Analog calibration sub-row
+        "let calPart='';"
+        "if(it.type==='analog'){"
+        "const cm=it.calMode||0;"
+        "calPart=`<div style='flex-basis:100%;margin-top:2px;display:flex;flex-wrap:wrap;gap:6px;align-items:center'>`"
+        "+`<span class='rlbl'>КАЛ</span>`"
+        "+`<select onchange='items[${i}].calMode=+this.value;render()'>`"
+        "+`<option value='0'${cm===0?' selected':''}>raw</option>`"
+        "+`<option value='1'${cm===1?' selected':''}>linear</option>`"
+        "+`<option value='2'${cm===2?' selected':''}>thermistor</option>`"
+        "+`</select>`;"
+        "if(cm===1){"
+        "calPart+=`<input type='number' style='width:68px' placeholder='raw↓' title='ADC min' value='${it.calRawMin||0}' onchange='items[${i}].calRawMin=+this.value'>`"
+        "+`<input type='number' style='width:68px' placeholder='raw↑' title='ADC max' value='${it.calRawMax||4095}' onchange='items[${i}].calRawMax=+this.value'>`"
+        "+`<input type='number' style='width:68px' placeholder='знач↓' title='val min' value='${it.calValMin||0}' onchange='items[${i}].calValMin=+this.value'>`"
+        "+`<input type='number' style='width:68px' placeholder='знач↑' title='val max' value='${it.calValMax||100}' onchange='items[${i}].calValMax=+this.value'>`"
+        "+`<input style='width:60px' placeholder='ед.' value='${it.calUnit||''}' onchange='items[${i}].calUnit=this.value'>`;"
+        "}else if(cm===2){"
+        "calPart+=`<input type='number' style='width:80px' placeholder='R_ref Ω' title='Reference resistor Ω' value='${it.calRRef||10000}' onchange='items[${i}].calRRef=+this.value'>`"
+        "+`<input type='number' style='width:68px' placeholder='Beta' value='${it.calBeta||3950}' onchange='items[${i}].calBeta=+this.value'>`"
+        "+`<input type='number' style='width:80px' placeholder='R25 Ω' title='Thermistor R at 25°C' value='${it.calR25||10000}' onchange='items[${i}].calR25=+this.value'>`"
+        "+`<input style='width:60px' placeholder='ед.' value='${it.calUnit||''}' onchange='items[${i}].calUnit=this.value'>`;"
+        "}"
+        "calPart+=`</div>`;"
+        "}"
         "d.innerHTML=`<select onchange='onTypeChange(${i},this.value)'>${typeOpts(i)}</select>`"
         "+pctrl"
         "+`<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>`"
-        "+`<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`;"
+        "+`<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`"
+        "+calPart;"
         "l.appendChild(d);});"
-        "const gp=items.filter(it=>!isI2C(it.type));"
+        "const gp=items.filter(it=>!isI2C(it.type)&&!isPcf(it.type));"
         "const freePins=PINS.filter(p=>!p.f&&!gp.find(x=>x.pin===p.n)).length;"
         "const usedI2CAddrs=items.filter(it=>isI2C(it.type)).map(x=>x.i2cAddr);"
-        "const freeI2C=TYPES.filter(t=>t.i2c).reduce((s,t)=>{"
+        "const freeI2C=TYPES.filter(t=>t.i2c&&!t.pcf).reduce((s,t)=>{"
         "const u=items.filter(x=>x.type===t.v).length;"
         "const fa=t.addrs.filter(a=>!usedI2CAddrs.includes(a.n)).length;"
         "return s+Math.min(Math.max(0,t.max-u),fa);},0);"
-        "const freeGPIOType=TYPES.filter(t=>!t.i2c).some(t=>gp.filter(x=>x.type===t.v).length<t.max);"
-        "const canAdd=items.length<12&&((freePins>0&&freeGPIOType)||freeI2C>0);"
+        // PCF free slots: existing chips free channels + possible new chips
+        "const pcfItems=items.filter(it=>isPcf(it.type));"
+        "const pcfAddrMap={};pcfItems.forEach(it=>{"
+        "if(!pcfAddrMap[it.i2cAddr])pcfAddrMap[it.i2cAddr]=new Set();"
+        "pcfAddrMap[it.i2cAddr].add(it.channel);});"
+        "const usedPcfAddrs=Object.keys(pcfAddrMap).map(Number);"
+        "let freePcf=usedPcfAddrs.reduce((s,a)=>s+(8-pcfAddrMap[a].size),0);"
+        "if(usedPcfAddrs.length<2)freePcf+=(2-usedPcfAddrs.length)*8;"
+        "freePcf=Math.min(freePcf,Math.max(0,16-items.filter(x=>x.type==='pcf_relay').length)"
+        "+Math.max(0,16-items.filter(x=>x.type==='pcf_button').length));"
+        "const freeGPIOType=TYPES.filter(t=>!t.i2c&&!t.pcf).some(t=>gp.filter(x=>x.type===t.v).length<t.max);"
+        "const canAdd=items.length<24&&((freePins>0&&freeGPIOType)||freeI2C>0||freePcf>0);"
         "document.getElementById('slots_info').innerHTML="
-        "`<b>${items.length}/12</b> слотов &nbsp;&bull;&nbsp; <b>${freePins}</b> GPIO &nbsp;&bull;&nbsp; <b>${freeI2C}</b> I2C`;"
+        "`<b>${items.length}/24</b> слотов &nbsp;&bull;&nbsp; <b>${freePins}</b> GPIO &nbsp;&bull;&nbsp; <b>${freeI2C}</b> I2C &nbsp;&bull;&nbsp; <b>${freePcf}</b> PCF`;"
         "const ba=document.getElementById('btn_add');"
         "ba.disabled=!canAdd;ba.style.opacity=canAdd?'1':'0.4';}"
         "function addItem(){"
-        "if(items.length>=12)return;"
-        "const gpi=items.filter(it=>!isI2C(it.type));"
+        "if(items.length>=24)return;"
+        "const gpi=items.filter(it=>!isI2C(it.type)&&!isPcf(it.type));"
         "const fp=PINS.find(p=>!p.f&&!p.w&&!gpi.find(x=>x.pin===p.n))||PINS.find(p=>!p.f&&!gpi.find(x=>x.pin===p.n));"
-        "const fgt=fp?TYPES.find(t=>!t.i2c&&items.filter(x=>x.type===t.v).length<t.max):null;"
-        "if(fgt){items.push({type:fgt.v,pin:fp.n,i2cAddr:0,label:''});render();return;}"
+        "const fgt=fp?TYPES.find(t=>!t.i2c&&!t.pcf&&items.filter(x=>x.type===t.v).length<t.max):null;"
+        "if(fgt){items.push({type:fgt.v,pin:fp.n,i2cAddr:0,channel:0,label:''});render();return;}"
         "const usedA=items.filter(it=>isI2C(it.type)).map(x=>x.i2cAddr);"
-        "for(const t of TYPES.filter(t=>t.i2c)){"
+        "for(const t of TYPES.filter(t=>t.i2c&&!t.pcf)){"
         "if(items.filter(x=>x.type===t.v).length>=t.max)continue;"
         "const fa=t.addrs.find(a=>!usedA.includes(a.n));"
-        "if(fa){items.push({type:t.v,pin:0,i2cAddr:fa.n,label:''});render();return;}}}"
-        "function savePeriph(){post('/api/gpio',{peripherals:items},d=>toast(d.ok?'Сохранено':d.err||'Ошибка',d.ok));}"
+        "if(fa){items.push({type:t.v,pin:0,i2cAddr:fa.n,channel:0,label:''});render();return;}}"
+        // PCF8574: find free addr+channel
+        "const pcfI=items.filter(it=>isPcf(it.type));"
+        "const pcfAM={};pcfI.forEach(it=>{if(!pcfAM[it.i2cAddr])pcfAM[it.i2cAddr]=new Set();pcfAM[it.i2cAddr].add(it.channel);});"
+        "const uPA=Object.keys(pcfAM).map(Number);"
+        "for(const t of TYPES.filter(t=>t.pcf)){"
+        "if(items.filter(x=>x.type===t.v).length>=t.max)continue;"
+        "for(const a of t.addrs){"
+        "const chs=pcfAM[a.n]||new Set();"
+        "if(!pcfAM[a.n]&&uPA.length>=2)continue;"
+        "const fc=[0,1,2,3,4,5,6,7].find(c=>!chs.has(c));"
+        "if(fc!==undefined){items.push({type:t.v,pin:0,i2cAddr:a.n,channel:fc,label:''});render();return;}}}"
+        "}"
+        "function savePeriph(){post('/api/gpio',{peripherals:items},d=>{"
+        "toast(d.ok?'Сохранено':d.err||'Ошибка',d.ok);"
+        "if(d.ok){const h=document.getElementById('reboot_hint');if(h)h.style.display='block';}}); }"
+        "function reboot(){if(confirm('Перезагрузить устройство?'))post('/api/reboot',{},()=>{});}"
+        "const I2C_NAMES={0x29:'VL53L0X/L1X',0x38:'AHT10/AHT20',0x39:'AHT10/AHT20',"
+        "0x3C:'SSD1306 OLED',0x3D:'SSD1306 OLED',0x48:'ADS1115',0x49:'ADS1115',"
+        "0x4A:'ADS1115',0x4B:'ADS1115',0x68:'MPU6050/DS3231',0x69:'MPU6050',"
+        "0x76:'BME/BMP280',0x77:'BME/BMP280',0x20:'PCF8574',0x21:'PCF8574',"
+        "0x22:'PCF8574',0x23:'PCF8574',0x24:'PCF8574',0x25:'PCF8574',"
+        "0x26:'PCF8574',0x27:'PCF8574'};"
+        "const WIRE_ERR=['OK','data too long','NACK on addr','NACK on data','other error','timeout'];"
+        "function scanI2c(){"
+        "const el=document.getElementById('i2c_result');"
+        "el.innerHTML='<span style=\"color:#888\">Сканирование...</span>';"
+        "fetch('/api/i2c-scan').then(r=>r.json()).then(d=>{"
+        "let h='<div style=\"font-size:.78rem;color:#8e8e93;margin-bottom:8px\">SDA→GPIO'+d.sda+'  SCL→GPIO'+d.scl"
+        "+'  |  probe 0x38: <code style=\"color:'+(d.probe_0x38===0?'#34c759':'#ff453a')+'\">'+(WIRE_ERR[d.probe_0x38]||d.probe_0x38)+'</code></div>';"
+        "if(!d.devices||d.devices.length===0){"
+        "h+='<span style=\"color:#ff453a\">Устройства не найдены.</span> ';"
+        "if(d.probe_0x38!==0)h+='<span style=\"color:#f4a261\">Возможно: нет подтяжек, неверные пины, нет питания.</span>';"
+        "el.innerHTML=h;return;}"
+        "h+='<table style=\"border-collapse:collapse;width:100%\">';"
+        "h+='<tr><th style=\"text-align:left;padding:4px 8px;color:#8e8e93\">Адрес</th>"
+        "<th style=\"text-align:left;padding:4px 8px;color:#8e8e93\">Устройство</th></tr>';"
+        "d.devices.forEach(dev=>{"
+        "const name=I2C_NAMES[dev.addr]||'Неизвестно';"
+        "h+='<tr><td style=\"padding:4px 8px;font-family:monospace;color:#a855f7\">'+dev.hex+'</td>"
+        "<td style=\"padding:4px 8px\">'+name+'</td></tr>';"
+        "});"
+        "h+='</table>';"
+        "el.innerHTML=h;"
+        "}).catch(()=>{el.innerHTML='<span style=\"color:#ff453a\">Ошибка запроса</span>';});}"
         "render();"
 
         // rules
         "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'}"
         ",{v:'off',l:'выключить'},{v:'pulse',l:'импульс'}];"
-        "const TRIGGER_TYPES=['button','analog','dht22','ds18b20','aht10','vl53'];"
-        "const TARGET_TYPES=['relay','pwm','neopixel','pcf8574'];"
+        "const TRIGGER_TYPES=['button','pcf_button','analog','dht22','ds18b20','aht10','vl53'];"
+        "const TARGET_TYPES=['relay','pcf_relay','pwm','neopixel'];"
         "function trigType(key){const it=items.find(x=>(san(x.label)||x.type+'_'+x.pin)===san(key));return it?it.type:'';}"
         "function eventsFor(type){"
         "if(['dht22','aht10'].includes(type))return["
@@ -469,24 +618,32 @@ void ConfigServer::_handleSaveGpio() {
         return;
     }
     JsonArray arr = doc["peripherals"].as<JsonArray>();
-    if (!arr || arr.size() > 12) {
-        _server.send(400, "application/json", "{\"ok\":false,\"err\":\"max 12 peripherals\"}");
+    if (!arr || arr.size() > 24) {
+        _server.send(400, "application/json", "{\"ok\":false,\"err\":\"max 24 peripherals\"}");
         return;
     }
 
-    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","pcf8574"};
-    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,     1,        2};
-    static const uint8_t tCount    = 10;
-    static const char*   i2cTypes[] = {"aht10","vl53","pcf8574"};
-    static const uint8_t i2cCount   = 3;
-    static const uint8_t forbidden[] = {12, 13, 18, 19};
+    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","pcf_relay","pcf_button"};
+    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,     1,        16,         16};
+    static const uint8_t tCount    = 11;
+    static const char*   i2cTypes[] = {"aht10","vl53","pcf_relay","pcf_button"};
+    static const uint8_t i2cCount   = 4;
+    static const uint8_t forbidden[] = {12, 13};
 
     uint8_t cnt[tCount] = {};
     bool    usedPin[24] = {};
 
+    // PCF8574 channel dedup state
+    struct PcfChan { uint8_t addr; uint8_t ch; };
+    PcfChan pcfChans[32];
+    uint8_t pcfChanCnt  = 0;
+    uint8_t pcfAddrs[8] = {};
+    uint8_t pcfAddrCnt  = 0;
+
     for (JsonObject obj : arr) {
         String type = obj["type"].as<String>();
-        bool isI2C = false;
+        bool isI2C  = false;
+        bool isPcf  = (type == "pcf_relay" || type == "pcf_button");
         for (uint8_t k = 0; k < i2cCount; k++) if (type == i2cTypes[k]) { isI2C = true; break; }
 
         if (!isI2C) {
@@ -505,6 +662,39 @@ void ConfigServer::_handleSaveGpio() {
                     return;
                 }
                 usedPin[pin] = true;
+            }
+        }
+
+        if (isPcf) {
+            uint8_t addr = obj["i2cAddr"] | 0;
+            uint8_t ch   = obj["channel"] | 0;
+            if (addr < 0x20 || addr > 0x27) {
+                _server.send(400, "application/json",
+                    "{\"ok\":false,\"err\":\"PCF8574 недопустимый адрес\"}");
+                return;
+            }
+            if (ch > 7) {
+                _server.send(400, "application/json",
+                    "{\"ok\":false,\"err\":\"PCF8574 канал 0–7\"}");
+                return;
+            }
+            for (uint8_t k = 0; k < pcfChanCnt; k++) {
+                if (pcfChans[k].addr == addr && pcfChans[k].ch == ch) {
+                    _server.send(400, "application/json",
+                        "{\"ok\":false,\"err\":\"PCF 0x" + String(addr, HEX) + " ch" + String(ch) + " занят\"}");
+                    return;
+                }
+            }
+            pcfChans[pcfChanCnt++] = {addr, ch};
+            bool found = false;
+            for (uint8_t k = 0; k < pcfAddrCnt; k++) if (pcfAddrs[k] == addr) { found = true; break; }
+            if (!found) {
+                if (pcfAddrCnt >= 2) {
+                    _server.send(400, "application/json",
+                        "{\"ok\":false,\"err\":\"макс. 2 PCF8574 чипа\"}");
+                    return;
+                }
+                pcfAddrs[pcfAddrCnt++] = addr;
             }
         }
 
@@ -565,6 +755,134 @@ void ConfigServer::_handleStatus() {
                   "\"ip\":\"" + WiFi.localIP().toString() + "\","
                   "\"mqtt\":\"" + mqtt.host + "\","
                   "\"rssi\":" + WiFi.RSSI() + "}";
+    _server.send(200, "application/json", json);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+void ConfigServer::_handleDash() {
+    String body =
+        "<div class='card'>"
+        "<h2>&#x1F4CA; Состояние периферии</h2>"
+        "<div id='dash' style='display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-top:4px'>"
+        "<span style='color:#8e8e93;font-size:.85rem'>Загрузка...</span>"
+        "</div>"
+        "<p style='font-size:.75rem;color:#555;margin-top:12px'>Обновление каждые 2с</p>"
+        "</div>"
+
+        "<script>"
+        "function icon(t){"
+        "return{relay:'&#x1F50C;',pcf_relay:'&#x1F50C;',button:'&#x1F518;',pcf_button:'&#x1F518;',"
+        "analog:'&#x1F4CA;',pwm:'&#x3030;',neopixel:'&#x1F7E3;',"
+        "dht22:'&#x1F321;',ds18b20:'&#x1F321;',aht10:'&#x1F321;',vl53:'&#x1F4CF;'}[t]||'&#x26AA;';}"
+        "function val(p){"
+        "if(!p.ok)return '<span style=\"color:#ff453a\">нет связи</span>';"
+        "if(p.type==='relay'||p.type==='pcf_relay')"
+        "return '<span style=\"color:'+(p.on?'#34c759':'#8e8e93')+'\">'+(p.on?'ВКЛ':'выкл')+'</span>';"
+        "if(p.type==='button'||p.type==='pcf_button')"
+        "return '<span style=\"color:'+(p.pressed?'#ff453a':'#8e8e93')+'\">'+(p.pressed?'&#x25CF; НАЖАТА':'&#x25CB; отпущена')+'</span>';"
+        "if(p.type==='aht10'||p.type==='dht22')"
+        "return p.temp.toFixed(1)+'&#176;C &nbsp; '+p.humidity.toFixed(1)+'%';"
+        "if(p.type==='ds18b20')return p.temp.toFixed(1)+'&#176;C';"
+        "if(p.type==='vl53')return p.distance+' мм';"
+        "if(p.type==='analog')return p.converted!==undefined?p.converted.toFixed(2)+' '+(p.unit||''):p.value;"
+        "if(p.type==='pwm')return 'duty '+p.duty;"
+        "return '?';}"
+        "function btn(p){"
+        "if((p.type==='relay'||p.type==='pcf_relay')&&p.ok)"
+        "return '<button onclick=\"cmd(\\'' + p.key + '\\',{on:'+(!p.on)+'})\" "
+        "style=\"margin-top:8px;padding:4px 14px;font-size:.78rem;background:'+(p.on?'#3b1a1a':'#1a3b1a')+"
+        "';color:'+(p.on?'#ff453a':'#34c759')+';border-radius:7px;border:none;cursor:pointer\">'+(p.on?'Выкл':'Вкл')+'</button>';"
+        "return '';}"
+        "function render(data){"
+        "document.getElementById('dash').innerHTML=data.map(p=>"
+        "'<div style=\"background:#2a2a2d;border-radius:14px;padding:14px\">'"
+        "+'<div style=\"font-size:.72rem;color:#8e8e93;margin-bottom:3px\">'+icon(p.type)+' '+p.type+'</div>'"
+        "+'<div style=\"font-size:.9rem;font-weight:600;margin-bottom:6px\">'+p.label+'</div>'"
+        "+'<div style=\"font-size:1rem\">'+val(p)+'</div>'"
+        "+btn(p)"
+        "+'</div>').join('');}"
+        "function cmd(key,data){"
+        "fetch('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify({key:key,payload:JSON.stringify(data)})});"
+        "setTimeout(refresh,200);}"
+        "function refresh(){"
+        "fetch('/api/state').then(r=>r.json()).then(render)"
+        ".catch(()=>{});}"
+        "refresh();setInterval(refresh,2000);"
+        "</script>";
+
+    _server.send(200, "text/html", _page("Статус", "dash", body));
+}
+
+void ConfigServer::_handleApiState() {
+    String json = _stateProvider ? _stateProvider() : "[]";
+    _server.send(200, "application/json", json);
+}
+
+void ConfigServer::_handleApiCmd() {
+    if (!_server.hasArg("plain")) { _server.send(400); return; }
+    JsonDocument doc;
+    if (deserializeJson(doc, _server.arg("plain")) != DeserializationError::Ok) {
+        _server.send(400, "application/json", "{\"ok\":false}");
+        return;
+    }
+    String key     = doc["key"].as<String>();
+    String payload = doc["payload"].as<String>();
+    if (_cmdHandler && key.length()) {
+        _cmdHandler(key, payload);
+        _server.send(200, "application/json", "{\"ok\":true}");
+    } else {
+        _server.send(400, "application/json", "{\"ok\":false}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// I2C scanner
+// ---------------------------------------------------------------------------
+
+void ConfigServer::_handleI2cScan() {
+    int sda = _server.hasArg("sda") ? _server.arg("sda").toInt() : 19;
+    int scl = _server.hasArg("scl") ? _server.arg("scl").toInt() : 18;
+
+    // Reinit only if non-default pins requested; PeriphManager already owns Wire on 19/18
+    if (sda != 19 || scl != 18) {
+        Wire.end();
+        delay(50);
+        Wire.begin(sda, scl);
+        delay(50);
+    }
+
+    Wire.beginTransmission(0x38);
+    uint8_t probe = Wire.endTransmission();
+
+    String json = "{\"sda\":" + String(sda) + ",\"scl\":" + String(scl) +
+                  ",\"probe_0x38\":" + String(probe) + ",\"devices\":[";
+    bool first = true;
+    for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        uint8_t err = Wire.endTransmission();
+        if (err == 0) {
+            if (!first) json += ",";
+            char buf[8];
+            snprintf(buf, sizeof(buf), "0x%02X", addr);
+            json += "{\"addr\":" + String(addr) + ",\"hex\":\"" + buf + "\"}";
+            first = false;
+        }
+    }
+    json += "]}";
+    Log.log("I2C scan sda=" + String(sda) + " scl=" + String(scl) +
+            " probe_0x38=" + String(probe) + (first ? " no devices" : " found devices"));
+
+    // Restore default Wire if we changed pins
+    if (sda != 19 || scl != 18) {
+        Wire.end();
+        delay(50);
+        Wire.begin(19, 18);
+    }
+
     _server.send(200, "application/json", json);
 }
 

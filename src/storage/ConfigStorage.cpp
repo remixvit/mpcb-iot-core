@@ -96,3 +96,16 @@ void ConfigStorage::saveRules(const String& json) {
     _prefs.putString("cfg", json);
     _prefs.end();
 }
+
+float ConfigStorage::loadCalOffset(const String& key) {
+    _prefs.begin("poffsets", true);
+    float v = _prefs.getFloat(key.substring(0, 14).c_str(), 0.0f);
+    _prefs.end();
+    return v;
+}
+
+void ConfigStorage::saveCalOffset(const String& key, float offset) {
+    _prefs.begin("poffsets", false);
+    _prefs.putFloat(key.substring(0, 14).c_str(), offset);
+    _prefs.end();
+}

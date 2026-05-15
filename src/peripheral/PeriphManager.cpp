@@ -24,6 +24,10 @@
   #include <VL53L1X.h>
   #define MPCB_HAS_VL53L1X
 #endif
+#if __has_include(<PCF8574.h>)
+  #include <PCF8574.h>
+  #define MPCB_HAS_PCF8574
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -42,13 +46,38 @@ String PeriphManager::_sanitize(const String& s) {
 void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIotCore& iot) {
     _deviceId = deviceId;
     _iot      = &iot;
+    _storage  = &storage;
     _count    = 0;
+    memset(_pcfObjs, 0, sizeof(_pcfObjs));
 
     String json = storage.loadPeripherals();
     JsonDocument doc;
     if (deserializeJson(doc, json) != DeserializationError::Ok || !doc.is<JsonArray>()) {
         Log.log("Periph", "No peripherals configured");
         return;
+    }
+
+    // ── I2C bus init (once, before _initPeriph) ─────────────────────────────
+    JsonArray arrCheck = doc.as<JsonArray>();
+    for (JsonObject obj : arrCheck) {
+        String t = obj["type"].as<String>();
+        if (t == "aht10" || t == "vl53" || t == "pcf_relay" || t == "pcf_button") {
+            // Bus recovery: toggle SCL 9× to release any stuck slave (e.g. VL53 mid-ranging)
+            pinMode(19, OUTPUT); pinMode(18, OUTPUT);
+            digitalWrite(19, HIGH);
+            for (int i = 0; i < 9; i++) {
+                digitalWrite(18, LOW); delayMicroseconds(5);
+                digitalWrite(18, HIGH); delayMicroseconds(5);
+            }
+            digitalWrite(19, LOW); delayMicroseconds(5);  // STOP
+            digitalWrite(19, HIGH); delayMicroseconds(5);
+            Wire.end();
+            delay(20);
+            Wire.begin(19, 18);
+            delay(50);
+            Log.log("Periph", "I2C init SDA=19 SCL=18");
+            break;
+        }
     }
 
     JsonArray arr = doc.as<JsonArray>();
@@ -59,12 +88,26 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
         p.type    = obj["type"].as<String>();
         p.pin     = obj["pin"]     | 0;
         p.i2cAddr = obj["i2cAddr"] | 0;
+        p.channel = obj["channel"] | 0;
         p.label   = obj["label"].as<String>();
         if (p.label.isEmpty()) p.label = p.type + String(p.pin);
+
+        // Analog calibration fields
+        p.calMode   = obj["calMode"]   | 0;
+        p.calRawMin = obj["calRawMin"] | 0.0f;
+        p.calRawMax = obj["calRawMax"] | 4095.0f;
+        p.calValMin = obj["calValMin"] | 0.0f;
+        p.calValMax = obj["calValMax"] | 100.0f;
+        p.calRRef   = obj["calRRef"]   | 10000.0f;
+        p.calBeta   = obj["calBeta"]   | 3950.0f;
+        p.calR25    = obj["calR25"]    | 10000.0f;
+        if (!obj["calUnit"].isNull()) p.calUnit = obj["calUnit"].as<String>();
 
         p.key        = _sanitize(p.label);
         p.topicState = "mpcb/devices/" + deviceId + "/" + p.key + "/state";
         p.topicSet   = "mpcb/devices/" + deviceId + "/" + p.key + "/set";
+
+        if (p.type == "analog") p.calOffset = storage.loadCalOffset(p.key);
 
         _initPeriph(p);
         _count++;
@@ -74,16 +117,6 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
     }
 
     Log.log("Periph", "Initialized " + String(_count) + " peripheral(s)");
-
-    // ── I2C bus init (once) ──────────────────────────────────────────────────
-    for (uint8_t i = 0; i < _count; i++) {
-        const String& t = _list[i].type;
-        if (t == "aht10" || t == "vl53" || t == "pcf8574") {
-            Wire.begin(22, 23);
-            Log.log("Periph", "I2C init SDA=22 SCL=23");
-            break;
-        }
-    }
 
     // ── Rules ────────────────────────────────────────────────────────────────
     _rulesCount = 0;
@@ -189,7 +222,22 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         VL53L1X* l1x = new VL53L1X();
         l1x->setBus(&Wire);
         l1x->setTimeout(500);
-        if (l1x->init()) {
+        // Soft-reset VL53L1X: needed when sensor was in continuous mode at ESP restart
+        { Wire.beginTransmission(0x29);
+          Wire.write(0x00); Wire.write(0x00);  // SOFT_RESET register
+          Wire.write(0x00);                     // enter reset
+          Wire.endTransmission();
+          delay(2);
+          Wire.beginTransmission(0x29);
+          Wire.write(0x00); Wire.write(0x00);
+          Wire.write(0x01);                     // exit reset
+          Wire.endTransmission();
+          delay(5);
+        }
+        // Retry init up to 10 times, 200ms apart
+        bool l1xOk = false;
+        for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
+        if (l1xOk) {
             l1x->setDistanceMode(VL53L1X::Long);
             l1x->setMeasurementTimingBudget(50000);
             l1x->startContinuous(100);
@@ -210,14 +258,16 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 Log.log("Periph", "vl53 L0X at 0x" + String(p.i2cAddr ? p.i2cAddr : 0x29, HEX));
             } else {
                 delete l0x;
-                Log.log("Periph", "vl53 not found");
+                Log.log("Periph", "vl53 not found (L1X and L0X both failed)");
             }
         }
 #elif defined(MPCB_HAS_VL53L1X)
         VL53L1X* l1x = new VL53L1X();
         l1x->setBus(&Wire);
         l1x->setTimeout(500);
-        if (l1x->init()) {
+        bool l1xOk = false;
+        for (uint8_t r = 0; r < 5 && !l1xOk; r++) { delay(100); l1xOk = l1x->init(); }
+        if (l1xOk) {
             l1x->setDistanceMode(VL53L1X::Long);
             l1x->setMeasurementTimingBudget(50000);
             l1x->startContinuous(100);
@@ -246,6 +296,41 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 #else
         Log.log("Periph", "vl53: add Adafruit_VL53L0X or VL53L1X to lib_deps");
         p.initialized = false;
+#endif
+
+    } else if (p.type == "pcf_relay" || p.type == "pcf_button") {
+#ifdef MPCB_HAS_PCF8574
+        if (p.i2cAddr < 0x20 || p.i2cAddr > 0x27) {
+            Log.log("Periph", p.type + ": bad addr 0x" + String(p.i2cAddr, HEX));
+            return;
+        }
+        uint8_t idx = p.i2cAddr - 0x20;
+        if (!_pcfObjs[idx]) {
+            // Create shared PCF8574 object for this address
+            PCF8574* pcf = new PCF8574(p.i2cAddr, &Wire);
+            if (pcf->begin()) {
+                _pcfObjs[idx] = pcf;
+                Log.log("Periph", "PCF8574 init addr=0x" + String(p.i2cAddr, HEX));
+            } else {
+                delete pcf;
+                Log.log("Periph", "PCF8574 not found at 0x" + String(p.i2cAddr, HEX));
+                return;
+            }
+        }
+        PCF8574* pcf = (PCF8574*)_pcfObjs[idx];
+        if (p.type == "pcf_relay") {
+            // HIGH = relay OFF (active-low relay modules use LOW=active)
+            pcf->write(p.channel, HIGH);
+            p.boolState = false;
+        } else {
+            // pcf_button: read initial state (LOW=pressed with pullup)
+            p.boolState = !pcf->read(p.channel);
+            p.prevBool  = p.boolState;
+        }
+        p.initialized = true;
+        Log.log("Periph", p.type + " addr=0x" + String(p.i2cAddr, HEX) + " ch=" + p.channel);
+#else
+        Log.log("Periph", "PCF8574: add 'robtillaart/PCF8574' to lib_deps");
 #endif
 
     } else {
@@ -292,14 +377,64 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             Log.log("Rules", p.key + " pulse end → OFF");
         }
 
+    } else if (p.type == "pcf_relay") {
+#ifdef MPCB_HAS_PCF8574
+        if (p.pulseEndMs > 0 && now >= p.pulseEndMs) {
+            p.pulseEndMs = 0;
+            p.boolState  = false;
+            uint8_t idx  = p.i2cAddr - 0x20;
+            if (idx < 8 && _pcfObjs[idx])
+                ((PCF8574*)_pcfObjs[idx])->write(p.channel, HIGH); // active-low: HIGH=OFF
+            _publishState(p);
+            Log.log("Rules", p.key + " pcf_relay pulse end → OFF");
+        }
+#endif
+
+    } else if (p.type == "pcf_button") {
+#ifdef MPCB_HAS_PCF8574
+        uint8_t idx = p.i2cAddr - 0x20;
+        if (idx >= 8 || !_pcfObjs[idx]) return;
+        bool cur = !((PCF8574*)_pcfObjs[idx])->read(p.channel); // LOW=pressed
+        if (cur != p.prevBool) {
+            p.prevBool   = cur;
+            p.pulseEndMs = now + 30;
+        } else if (p.pulseEndMs && now >= p.pulseEndMs) {
+            p.pulseEndMs = 0;
+            if (cur != p.boolState) {
+                p.boolState = cur;
+                _publishState(p);
+                _checkRules(p.key, cur ? "pressed" : "released");
+                _checkRules(p.key, "any");
+            }
+        }
+#endif
+
     } else if (p.type == "analog") {
         if (now - p.lastReadMs >= 10000) {
-            p.lastReadMs  = now;
-            int raw       = analogRead(p.pin);
-            p.intState    = raw;
-            p.floatState  = raw * (3.3f / 4095.0f);  // 12-bit ADC → voltage
+            p.lastReadMs = now;
+            int raw      = analogRead(p.pin);
+            p.intState   = raw;
+            p.floatState = raw * (3.3f / 4095.0f);  // 12-bit ADC → voltage
+
+            // Apply calibration
+            if (p.calMode == 1) {  // linear interpolation
+                float span  = p.calRawMax - p.calRawMin;
+                p.converted = (span != 0.0f)
+                    ? p.calValMin + (raw - p.calRawMin) / span * (p.calValMax - p.calValMin)
+                    : 0.0f;
+            } else if (p.calMode == 2) {  // thermistor NTC Beta equation
+                if (raw > 0 && raw < 4095) {
+                    float R = p.calRRef * (float)raw / (4095.0f - (float)raw);
+                    p.converted = 1.0f / (1.0f / (p.calR25 + 273.15f) + log(R / p.calR25) / p.calBeta) - 273.15f;
+                }
+            } else {
+                p.converted = (float)raw;
+            }
+            p.converted -= p.calOffset;
+
             _publishState(p);
-            _checkRulesValue(p.key, (float)p.intState);
+            float ruleVal = (p.calMode != 0) ? p.converted : (float)p.intState;
+            _checkRulesValue(p.key, ruleVal);
         }
     } else if (p.type == "dht22") {
 #ifdef MPCB_HAS_DHT
@@ -443,11 +578,41 @@ void PeriphManager::_applyCommand(Peripheral& p, const String& payload) {
             _publishState(p);
         }
 
+    } else if (p.type == "pcf_relay") {
+#ifdef MPCB_HAS_PCF8574
+        if (doc["pulse"].is<int>()) {
+            _applyAction(p, "pulse", doc["pulse"].as<int>());
+            return;
+        }
+        if (doc["on"].is<bool>()) {
+            uint8_t idx = p.i2cAddr - 0x20;
+            if (idx < 8 && _pcfObjs[idx]) {
+                p.boolState = doc["on"].as<bool>();
+                ((PCF8574*)_pcfObjs[idx])->write(p.channel, p.boolState ? LOW : HIGH);
+                _publishState(p);
+            }
+        }
+#endif
+
     } else if (p.type == "pwm") {
         if (doc["duty"].is<int>()) {
             p.intState = constrain(doc["duty"].as<int>(), 0, 255);
             ledcWrite(p.pin, (uint32_t)p.intState);
             _publishState(p);
+        }
+
+    } else if (p.type == "analog") {
+        if (doc["tare"].is<bool>() && doc["tare"].as<bool>()) {
+            // raw_converted = current reading before offset; new zero = capture it
+            p.calOffset += p.converted;  // raw_conv = converted + old_offset
+            p.converted  = 0.0f;
+            if (_storage) _storage->saveCalOffset(p.key, p.calOffset);
+            _publishState(p);
+            Log.log("Periph", p.key + " tare → offset=" + String(p.calOffset, 3));
+        } else if (doc["tare_reset"].is<bool>() && doc["tare_reset"].as<bool>()) {
+            p.calOffset = 0.0f;
+            if (_storage) _storage->saveCalOffset(p.key, 0.0f);
+            Log.log("Periph", p.key + " tare reset");
         }
 
     } else if (p.type == "neopixel") {
@@ -525,6 +690,28 @@ void PeriphManager::_applyAction(Peripheral& p, const String& action, uint32_t p
         _publishState(p);
         Log.log("Rules", p.key + " relay " + action + " → " + (p.boolState ? "ON" : "OFF"));
 
+    } else if (p.type == "pcf_relay") {
+#ifdef MPCB_HAS_PCF8574
+        uint8_t idx = p.i2cAddr - 0x20;
+        if (idx >= 8 || !_pcfObjs[idx]) return;
+        PCF8574* pcf = (PCF8574*)_pcfObjs[idx];
+        if (action == "on")          p.boolState = true;
+        else if (action == "off")    p.boolState = false;
+        else if (action == "toggle") p.boolState = !p.boolState;
+        else if (action == "pulse") {
+            p.boolState  = true;
+            p.pulseEndMs = millis() + (pulseMs > 0 ? pulseMs : 500);
+            pcf->write(p.channel, LOW); // active-low: LOW=ON
+            _publishState(p);
+            Log.log("Rules", p.key + " pcf_relay pulse ON " + String(pulseMs) + "ms");
+            return;
+        } else return;
+        p.pulseEndMs = 0;
+        pcf->write(p.channel, p.boolState ? LOW : HIGH);
+        _publishState(p);
+        Log.log("Rules", p.key + " pcf_relay " + action);
+#endif
+
     } else if (p.type == "pwm") {
         if (action == "on")          p.intState = 255;
         else if (action == "off")    p.intState = 0;
@@ -542,16 +729,24 @@ void PeriphManager::_publishState(const Peripheral& p) {
     if (!_iot) return;
     String payload;
 
-    if (p.type == "relay") {
+    if (p.type == "relay" || p.type == "pcf_relay") {
         payload = "{\"on\":" + String(p.boolState ? "true" : "false") + "}";
 
-    } else if (p.type == "button") {
+    } else if (p.type == "button" || p.type == "pcf_button") {
         payload = "{\"pressed\":" + String(p.boolState ? "true" : "false") + "}";
 
     } else if (p.type == "analog") {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "{\"value\":%ld,\"voltage\":%.2f}",
-                 (long)p.intState, p.floatState);
+        char buf[96];
+        if (p.calMode != 0 && !p.calUnit.isEmpty()) {
+            snprintf(buf, sizeof(buf), "{\"value\":%ld,\"voltage\":%.2f,\"converted\":%.2f,\"unit\":\"%s\"}",
+                     (long)p.intState, p.floatState, p.converted, p.calUnit.c_str());
+        } else if (p.calMode != 0) {
+            snprintf(buf, sizeof(buf), "{\"value\":%ld,\"voltage\":%.2f,\"converted\":%.2f}",
+                     (long)p.intState, p.floatState, p.converted);
+        } else {
+            snprintf(buf, sizeof(buf), "{\"value\":%ld,\"voltage\":%.2f}",
+                     (long)p.intState, p.floatState);
+        }
         payload = buf;
 
     } else if (p.type == "pwm") {
@@ -581,4 +776,50 @@ void PeriphManager::_publishState(const Peripheral& p) {
     }
 
     _iot->publish(p.topicState, payload, true);  // retain=true
+}
+
+// ─── Dashboard state JSON ─────────────────────────────────────────────────────
+
+String PeriphManager::getStateJson() const {
+    JsonDocument doc;
+    JsonArray arr = doc.to<JsonArray>();
+    for (uint8_t i = 0; i < _count; i++) {
+        const Peripheral& p = _list[i];
+        JsonObject obj = arr.add<JsonObject>();
+        obj["key"]   = p.key;
+        obj["label"] = p.label;
+        obj["type"]  = p.type;
+        obj["ok"]    = p.initialized;
+        if (p.type == "relay" || p.type == "pcf_relay") {
+            obj["on"] = p.boolState;
+        } else if (p.type == "button" || p.type == "pcf_button") {
+            obj["pressed"] = p.boolState;
+        } else if (p.type == "pwm") {
+            obj["duty"] = p.intState;
+        } else if (p.type == "analog") {
+            obj["value"]   = p.intState;
+            obj["voltage"] = p.floatState;
+            if (p.calMode != 0) { obj["converted"] = p.converted; obj["unit"] = p.calUnit; }
+        } else if (p.type == "dht22" || p.type == "aht10") {
+            obj["temp"]     = p.floatState;
+            obj["humidity"] = p.floatState2;
+        } else if (p.type == "ds18b20") {
+            obj["temp"] = p.floatState;
+        } else if (p.type == "vl53") {
+            obj["distance"] = p.intState;
+        }
+    }
+    String result;
+    serializeJson(doc, result);
+    return result;
+}
+
+void PeriphManager::handleLocalCmd(const String& key, const String& payload) {
+    for (uint8_t i = 0; i < _count; i++) {
+        if (_list[i].key == key) {
+            _applyCommand(_list[i], payload);
+            _publishState(_list[i]);
+            return;
+        }
+    }
 }

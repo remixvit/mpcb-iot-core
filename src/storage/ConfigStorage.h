@@ -41,6 +41,10 @@ public:
     String loadRules();
     void saveRules(const String& json);
 
+    // Tare offsets — stored independently so web UI saves don't erase them
+    float loadCalOffset(const String& key);
+    void saveCalOffset(const String& key, float offset);
+
 private:
     Preferences _prefs;
 };
