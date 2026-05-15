@@ -59,6 +59,14 @@ void MpcbIotCore::loop() {
     switch (_state) {
         case IotState::AP_PORTAL:
             if (_portal) _portal->loop();
+            if (_closeApRequested) {
+                _closeApRequested = false;
+                _portal->stop();
+                delete _portal;
+                _portal = nullptr;
+                WiFi.mode(WIFI_STA);
+                _startConfigServer();
+            }
             break;
 
         case IotState::CONFIG_SERVER:
@@ -125,13 +133,21 @@ void MpcbIotCore::_startAP() {
     _portal = new APPortal(_apName);
     _portal->onConnect([this](const String& ssid, const String& pass) {
         _storage.saveWifi(ssid, pass);
-        Log.log("IoT", "WiFi saved: " + ssid + ". Rebooting...");
-        delay(300);
-        ESP.restart();
+        Log.log("IoT", "WiFi saved: " + ssid + ". Waiting for STA connection...");
+        // Don't reboot — AP stays up, portal shows connection status
+    });
+    _portal->onClose([this]() {
+        _closeAP();
     });
     _portal->begin();
     _setState(IotState::AP_PORTAL);
-    Log.log("IoT", "AP portal: connect to \"" + _apName + "\" → http://192.168.4.1");
+    Log.log("IoT", "AP portal: connect to \"" + _apName + "\" -> http://192.168.4.1");
+}
+
+void MpcbIotCore::_closeAP() {
+    // Deferred — we're called from inside _portal->loop() (HTTP handler)
+    // Actual cleanup happens after loop() returns
+    _closeApRequested = true;
 }
 
 void MpcbIotCore::_startConfigServer() {

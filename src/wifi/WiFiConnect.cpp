@@ -8,6 +8,14 @@ void WiFiConnect::begin(const String& ssid, const String& password) {
     Serial.println("[WiFi] Connecting to: " + _ssid);
 }
 
+void WiFiConnect::beginSTA(const String& ssid, const String& password) {
+    _ssid     = ssid;
+    _password = password;
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(_ssid.c_str(), _password.c_str());
+    Serial.println("[WiFi] Connecting (AP+STA) to: " + _ssid);
+}
+
 bool WiFiConnect::waitConnected(uint32_t timeoutMs) {
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED) {

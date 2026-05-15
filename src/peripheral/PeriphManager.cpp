@@ -24,7 +24,7 @@ String PeriphManager::_sanitize(const String& s) {
     out.reserve(s.length());
     for (char c : s) {
         if (isAlphaNumeric(c)) out += (char)tolower(c);
-        else if (c == ' ' || c == '-' || c == '_') out += '_';
+        // all other characters dropped — labels must be [a-z0-9] only
     }
     return out;
 }
@@ -52,7 +52,7 @@ void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIo
         p.pin     = obj["pin"]     | 0;
         p.i2cAddr = obj["i2cAddr"] | 0;
         p.label   = obj["label"].as<String>();
-        if (p.label.isEmpty()) p.label = p.type + "_" + p.pin;
+        if (p.label.isEmpty()) p.label = p.type + String(p.pin);
 
         p.key        = _sanitize(p.label);
         p.topicState = "mpcb/devices/" + deviceId + "/" + p.key + "/state";
@@ -398,6 +398,7 @@ void PeriphManager::_checkRules(const String& triggerKey, const String& event) {
         for (uint8_t j = 0; j < _count; j++) {
             if (_list[j].key == r.targetKey && _list[j].initialized) {
                 _applyAction(_list[j], r.action, r.pulseMs);
+                Log.log("Rules", triggerKey + " " + r.event + " → " + r.action + " " + r.targetKey);
                 break;
             }
         }
