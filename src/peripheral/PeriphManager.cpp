@@ -16,6 +16,14 @@
   #include <Adafruit_AHTX0.h>
   #define MPCB_HAS_AHT
 #endif
+#if __has_include(<Adafruit_VL53L0X.h>)
+  #include <Adafruit_VL53L0X.h>
+  #define MPCB_HAS_VL53L0X
+#endif
+#if __has_include(<VL53L1X.h>)
+  #include <VL53L1X.h>
+  #define MPCB_HAS_VL53L1X
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -175,6 +183,71 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         p.initialized = false;
 #endif
 
+    } else if (p.type == "vl53") {
+#if defined(MPCB_HAS_VL53L1X) && defined(MPCB_HAS_VL53L0X)
+        // Both libraries present — try L1X first (newer chip, better range)
+        VL53L1X* l1x = new VL53L1X();
+        l1x->setBus(&Wire);
+        l1x->setTimeout(500);
+        if (l1x->init()) {
+            l1x->setDistanceMode(VL53L1X::Long);
+            l1x->setMeasurementTimingBudget(50000);
+            l1x->startContinuous(100);
+            p.sensorObj   = l1x;
+            p.floatState2 = 1.0f;  // 1=L1X, 0=L0X
+            p.lastReadMs  = millis();
+            p.initialized = true;
+            Log.log("Periph", "vl53 L1X at 0x" + String(p.i2cAddr ? p.i2cAddr : 0x29, HEX));
+        } else {
+            delete l1x;
+            Adafruit_VL53L0X* l0x = new Adafruit_VL53L0X();
+            if (l0x->begin(p.i2cAddr ? p.i2cAddr : 0x29, false, &Wire)) {
+                l0x->startRangeContinuous(100);
+                p.sensorObj   = l0x;
+                p.floatState2 = 0.0f;
+                p.lastReadMs  = millis();
+                p.initialized = true;
+                Log.log("Periph", "vl53 L0X at 0x" + String(p.i2cAddr ? p.i2cAddr : 0x29, HEX));
+            } else {
+                delete l0x;
+                Log.log("Periph", "vl53 not found");
+            }
+        }
+#elif defined(MPCB_HAS_VL53L1X)
+        VL53L1X* l1x = new VL53L1X();
+        l1x->setBus(&Wire);
+        l1x->setTimeout(500);
+        if (l1x->init()) {
+            l1x->setDistanceMode(VL53L1X::Long);
+            l1x->setMeasurementTimingBudget(50000);
+            l1x->startContinuous(100);
+            p.sensorObj   = l1x;
+            p.floatState2 = 1.0f;
+            p.lastReadMs  = millis();
+            p.initialized = true;
+            Log.log("Periph", "vl53 L1X init OK");
+        } else {
+            delete l1x;
+            Log.log("Periph", "vl53 L1X not found");
+        }
+#elif defined(MPCB_HAS_VL53L0X)
+        Adafruit_VL53L0X* l0x = new Adafruit_VL53L0X();
+        if (l0x->begin(p.i2cAddr ? p.i2cAddr : 0x29, false, &Wire)) {
+            l0x->startRangeContinuous(100);
+            p.sensorObj   = l0x;
+            p.floatState2 = 0.0f;
+            p.lastReadMs  = millis();
+            p.initialized = true;
+            Log.log("Periph", "vl53 L0X init OK");
+        } else {
+            delete l0x;
+            Log.log("Periph", "vl53 L0X not found");
+        }
+#else
+        Log.log("Periph", "vl53: add Adafruit_VL53L0X or VL53L1X to lib_deps");
+        p.initialized = false;
+#endif
+
     } else {
         Log.log("Periph", "Unknown type: " + p.type);
     }
@@ -276,6 +349,35 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             Log.log("Periph", p.key + " t=" + String(temp.temperature, 1) + " h=" + String(hum.relative_humidity, 1));
         }
 #endif
+    } else if (p.type == "vl53") {
+        if (now - p.lastReadMs >= 500) {
+            p.lastReadMs = now;
+            uint16_t mm = 0; bool ok = false;
+#if defined(MPCB_HAS_VL53L1X)
+            if (p.floatState2 >= 1.0f) {
+                VL53L1X* s = (VL53L1X*)p.sensorObj;
+                if (s->dataReady()) {
+                    mm = s->read(false);
+                    ok = (s->ranging_data.range_status == VL53L1X::RangeValid);
+                }
+            }
+#endif
+#if defined(MPCB_HAS_VL53L0X)
+            if (p.floatState2 < 1.0f) {
+                Adafruit_VL53L0X* s = (Adafruit_VL53L0X*)p.sensorObj;
+                if (s->isRangeComplete()) {
+                    mm = s->readRangeResult();
+                    ok = (mm < 8190);  // 8190=out-of-range, 0xFFFF=error
+                }
+            }
+#endif
+            if (ok) {
+                p.intState = mm;
+                _publishState(p);
+                _checkRulesValue(p.key, (float)mm);
+                Log.log("Periph", p.key + " dist=" + String(mm) + "mm");
+            }
+        }
     }
     // pwm / neopixel: event-driven only, nothing to poll
 }
@@ -470,6 +572,9 @@ void PeriphManager::_publishState(const Peripheral& p) {
         char buf[32];
         snprintf(buf, sizeof(buf), "{\"temp\":%.1f}", p.floatState);
         payload = buf;
+
+    } else if (p.type == "vl53") {
+        payload = "{\"distance\":" + String(p.intState) + "}";
 
     } else {
         return;
