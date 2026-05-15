@@ -46,6 +46,7 @@ public:
 private:
     void _setState(IotState s);
     void _startAP();
+    void _closeAP();
     void _startConfigServer();
     void _connectMqtt();
     void _mqttLoop();
@@ -70,7 +71,8 @@ private:
     String        _apName;
     uint32_t      _mqttReconnectAt = 0;
     uint32_t      _bleStatusAt     = 0;
-    bool          _wifiScanPending = false;
+    bool          _wifiScanPending   = false;
+    bool          _closeApRequested  = false;
 
     StateCallback     _onState;
     MqttCallback      _onMqtt;

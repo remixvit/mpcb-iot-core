@@ -8,6 +8,7 @@ public:
     using StatusCallback = std::function<void(bool connected)>;
 
     void begin(const String& ssid, const String& password);
+    void beginSTA(const String& ssid, const String& password);  // AP+STA mode — keeps AP alive
     bool waitConnected(uint32_t timeoutMs = 10000);
     void loop();
 
