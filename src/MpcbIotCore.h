@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <functional>
+#include "ITransport.h"
 #include "storage/ConfigStorage.h"
 #include "wifi/APPortal.h"
 #include "wifi/WiFiConnect.h"
@@ -20,7 +21,7 @@ enum class IotState {
     RUNNING
 };
 
-class MpcbIotCore {
+class MpcbIotCore : public ITransport {
 public:
     using StateCallback     = std::function<void(IotState state)>;
     using MqttCallback      = std::function<void(const String& topic, const String& payload)>;
@@ -38,9 +39,9 @@ public:
     void onDashState(ConfigServer::StateProvider cb) { _dashState = cb; }
     void onDashCmd(ConfigServer::CmdHandler cb)      { _dashCmd   = cb; }
 
-    // MQTT
-    bool publish(const String& topic, const String& payload, bool retain = false);
-    bool subscribe(const String& topic);
+    // ITransport
+    bool publish(const String& topic, const String& payload, bool retain = false) override;
+    bool subscribe(const String& topic) override;
 
     // Accessors
     IotState     state()   const { return _state; }

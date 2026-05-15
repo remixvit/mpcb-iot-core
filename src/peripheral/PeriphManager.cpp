@@ -43,10 +43,11 @@ String PeriphManager::_sanitize(const String& s) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-void PeriphManager::begin(const String& deviceId, ConfigStorage& storage, MpcbIotCore& iot) {
-    _deviceId = deviceId;
-    _iot      = &iot;
-    _storage  = &storage;
+void PeriphManager::begin(const String& deviceId, const String& deviceName, ConfigStorage& storage, ITransport& transport) {
+    _deviceId   = deviceId;
+    _deviceName = deviceName;
+    _transport  = &transport;
+    _storage    = &storage;
     _count    = 0;
     memset(_pcfObjs, 0, sizeof(_pcfObjs));
 
@@ -520,7 +521,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::onMqttConnected() {
-    _iot->subscribe("mpcb/devices/" + _deviceId + "/+/set");
+    _transport->subscribe("mpcb/devices/" + _deviceId + "/+/set");
     _publishConfig();
     for (uint8_t i = 0; i < _count; i++) {
         if (!_list[i].initialized) continue;
@@ -534,7 +535,7 @@ void PeriphManager::onMqttConnected() {
 void PeriphManager::_publishConfig() {
     JsonDocument doc;
     doc["device_id"]   = _deviceId;
-    doc["device_name"] = _iot ? _iot->storage().loadDevice().deviceName : "";
+    doc["device_name"] = _deviceName;
     doc["firmware"]    = "MpcbIotCore";
     doc["version"]     = MPCB_FIRMWARE_VERSION;
     doc["ip"]          = WiFi.localIP().toString();
@@ -547,7 +548,7 @@ void PeriphManager::_publishConfig() {
     }
     String out;
     serializeJson(doc, out);
-    _iot->publish("mpcb/devices/" + _deviceId + "/config", out, true);
+    _transport->publish("mpcb/devices/" + _deviceId + "/config", out, true);
     Log.log("MQTT", "Config published: " + String(_count) + " peripheral(s)");
 }
 
@@ -726,7 +727,7 @@ void PeriphManager::_applyAction(Peripheral& p, const String& action, uint32_t p
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::_publishState(const Peripheral& p) {
-    if (!_iot) return;
+    if (!_transport) return;
     String payload;
 
     if (p.type == "relay" || p.type == "pcf_relay") {
@@ -775,7 +776,7 @@ void PeriphManager::_publishState(const Peripheral& p) {
         return;
     }
 
-    _iot->publish(p.topicState, payload, true);  // retain=true
+    _transport->publish(p.topicState, payload, true);  // retain=true
 }
 
 // ─── Dashboard state JSON ─────────────────────────────────────────────────────

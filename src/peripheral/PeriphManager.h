@@ -1,11 +1,9 @@
 #pragma once
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "../ITransport.h"
 #include "../storage/ConfigStorage.h"
 #include "../log/RingLog.h"
-
-// Forward declaration
-class MpcbIotCore;
 
 // ─── Peripheral types ────────────────────────────────────────────────────────
 // relay    — digital output, ON/OFF via MQTT {"on": bool}
@@ -74,7 +72,7 @@ struct Peripheral {
 class PeriphManager {
 public:
     // Call when MQTT is connected (IotState::RUNNING)
-    void begin(const String& deviceId, ConfigStorage& storage, MpcbIotCore& iot);
+    void begin(const String& deviceId, const String& deviceName, ConfigStorage& storage, ITransport& transport);
 
     // Call every loop()
     void loop();
@@ -110,8 +108,9 @@ private:
     uint8_t       _count      = 0;
     Rule          _rules[MAX_RULES];
     uint8_t       _rulesCount = 0;
-    MpcbIotCore*  _iot        = nullptr;
+    ITransport*   _transport  = nullptr;
     String        _deviceId;
+    String        _deviceName;
     ConfigStorage* _storage   = nullptr;
 
     // PCF8574 shared objects — indexed by (i2cAddr - 0x20), max 8 chips
