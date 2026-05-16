@@ -217,44 +217,20 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         p.initialized = false;
 #endif
 
-    } else if (p.type == "vl53") {
-#if defined(MPCB_HAS_VL53L1X) || defined(MPCB_HAS_VL53L0X)
+    } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         {
             uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
             // Adafruit_AHTX0::begin() calls Wire.begin() without Wire.end() which on
-            // ESP32-C6 misconfigures the I2C peripheral (timing/config mismatch) while
-            // leaving GPIO mux intact. This silently breaks getSpadInfo() polling in
-            // VL53L0X::init(). Re-init the bus here to restore correct peripheral state.
-            Wire.end();
-            delay(5);
-            Wire.begin(19, 18);
-            delay(20);
-
-            // VL53L0X soft reset: after ESP.restart() device stays mid-measurement.
-            // Reg 0xBF = SOFT_RESET_GO2_SOFT_RESET_N (safe NOP for L1X at 16-bit addr 0xBF00).
-            Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x00); Wire.endTransmission();
-            delay(5);
-            Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x01); Wire.endTransmission();
-            delay(100);
-
-            // Auto-detect chip type by reading model ID register 0xC0:
-            //   VL53L0X → 0xEE,  VL53L1X → 0xEA
-            uint8_t modelId = 0x00;
-            for (uint8_t r = 0; r < 5 && modelId == 0x00; r++) {
-                if (r > 0) delay(20);
-                Wire.beginTransmission(addr); Wire.write(0xC0); Wire.endTransmission(false);
-                Wire.requestFrom(addr, (uint8_t)1);
-                modelId = Wire.available() ? Wire.read() : 0x00;
-            }
-            Log.log("Periph", "vl53 detect: modelId=0x" + String(modelId, HEX));
+            // ESP32-C6 misconfigures the I2C peripheral. Re-init here to restore state.
+            Wire.end(); delay(5); Wire.begin(19, 18); delay(20);
 
 #if defined(MPCB_HAS_VL53L1X)
-            if (modelId == 0xEA) {
-                // VL53L1X — soft reset via register 0x0000
+            if (p.type == "vl53l1") {
+                // Soft reset via 16-bit register 0x0000 (needed after ESP.restart())
                 Wire.beginTransmission(addr); Wire.write(0x00); Wire.write(0x00); Wire.write(0x00); Wire.endTransmission();
                 delay(2);
                 Wire.beginTransmission(addr); Wire.write(0x00); Wire.write(0x00); Wire.write(0x01); Wire.endTransmission();
-                delay(5);
+                delay(10);
                 VL53L1X* l1x = new VL53L1X();
                 l1x->setBus(&Wire);
                 l1x->setTimeout(500);
@@ -264,37 +240,38 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     l1x->setDistanceMode(VL53L1X::Long);
                     l1x->setMeasurementTimingBudget(200000);
                     l1x->startContinuous(200);
-                    p.sensorObj   = l1x;
-                    p.floatState2 = 1.0f;
-                    p.lastReadMs  = millis();
+                    p.sensorObj  = l1x;
+                    p.lastReadMs = millis();
                     p.initialized = true;
-                    Log.log("Periph", "vl53 L1X init OK");
+                    Log.log("Periph", "vl53l1 init OK");
                 } else {
                     delete l1x;
-                    Log.log("Periph", "vl53 L1X init failed");
+                    Log.log("Periph", "vl53l1 init failed");
                 }
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
-            if (modelId == 0xEE) {
+            if (p.type == "vl53l0") {
+                // Soft reset via 0xBF (SOFT_RESET_GO2_SOFT_RESET_N)
+                Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x00); Wire.endTransmission();
+                delay(5);
+                Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x01); Wire.endTransmission();
+                delay(100);
                 VL53L0X* l0x = new VL53L0X();
                 l0x->setBus(&Wire);
                 l0x->setTimeout(500);
                 bool l0xOk = l0x->init();
                 if (l0xOk) {
                     l0x->setMeasurementTimingBudget(50000);
-                    Log.log("Periph", "vl53 L0X init OK");
+                    Log.log("Periph", "vl53l0 init OK");
                 } else {
                     // getSpadInfo() hangs after soft reset: 0xBF only resets Go2 CPU,
                     // NOT the SPAD/NVM analog hardware (stays stuck mid-measurement).
                     // DataInit DID run before getSpadInfo failed, so stop_variable is set.
                     // Complete StaticInit + RefCalibration via public writeReg/readReg API.
-                    Log.log("Periph", "vl53 L0X warmStart");
+                    Log.log("Periph", "vl53l0 warmStart");
 
-                    // getSpadInfo() timed out at the poll loop (line 895 in VL53L0X.cpp)
-                    // without executing its cleanup (lines 905-912). Restore register state:
-                    // on page 0xFF=0x07: clear 0x81; switch to 0x06: clear bit2 of 0x83;
-                    // switch to 0x01: set 0x00=0x01; back to page 0x00; clear 0x80.
+                    // getSpadInfo() exited without restoring register state — clear private-mode
                     l0x->writeReg(0x81, 0x00);
                     l0x->writeReg(0xFF, 0x06);
                     l0x->writeReg(0x83, l0x->readReg(0x83) & ~0x04);
@@ -348,7 +325,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     l0x->writeReg(0x84, l0x->readReg(0x84) & ~0x10);
                     l0x->writeReg(0x0B, 0x01);
 
-                    // disable MSRC/TCC, set timing budget
+                    // timing budget
                     l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0xE8);
                     l0x->setMeasurementTimingBudget(50000);
 
@@ -368,27 +345,20 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 
                     l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0xE8);
                     l0xOk = true;
-                    Log.log("Periph", "vl53 L0X warmStart OK");
+                    Log.log("Periph", "vl53l0 warmStart OK");
                 }
                 if (l0xOk) {
                     l0x->startContinuous(100);
-                    p.sensorObj   = l0x;
-                    p.floatState2 = 0.0f;
-                    p.lastReadMs  = millis();
+                    p.sensorObj  = l0x;
+                    p.lastReadMs = millis();
                     p.initialized = true;
                 } else {
                     delete l0x;
-                    Log.log("Periph", "vl53 L0X init failed");
+                    Log.log("Periph", "vl53l0 init failed");
                 }
             }
 #endif
-            if (!p.initialized)
-                Log.log("Periph", "vl53 not found (modelId=0x" + String(modelId, HEX) + ")");
         }
-#else
-        Log.log("Periph", "vl53: add Adafruit_VL53L0X or VL53L1X to lib_deps");
-        p.initialized = false;
-#endif
 
     } else if (p.type == "pcf_relay" || p.type == "pcf_button") {
 #ifdef MPCB_HAS_PCF8574
@@ -594,12 +564,12 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             Log.log("Periph", p.key + " t=" + String(temp.temperature, 1) + " h=" + String(hum.relative_humidity, 1));
         }
 #endif
-    } else if (p.type == "vl53") {
+    } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         if (now - p.lastReadMs >= 500) {
             p.lastReadMs = now;
             uint16_t mm = 0; bool ok = false;
 #if defined(MPCB_HAS_VL53L1X)
-            if (p.floatState2 >= 1.0f) {
+            if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 if (s->dataReady()) {
                     mm = s->read(false);
@@ -608,7 +578,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
-            if (p.floatState2 < 1.0f) {
+            if (p.type == "vl53l0") {
                 VL53L0X* s = (VL53L0X*)p.sensorObj;
                 mm = s->readRangeContinuousMillimeters();
                 ok = !s->timeoutOccurred() && (mm < 8190);
@@ -897,7 +867,7 @@ void PeriphManager::_publishState(const Peripheral& p) {
         snprintf(buf, sizeof(buf), "{\"temp\":%.1f}", p.floatState);
         payload = buf;
 
-    } else if (p.type == "vl53") {
+    } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         payload = "{\"distance\":" + String(p.intState) + "}";
 
     } else if (p.type == "ccs811") {
@@ -937,7 +907,7 @@ String PeriphManager::getStateJson() const {
             obj["humidity"] = p.floatState2;
         } else if (p.type == "ds18b20") {
             obj["temp"] = p.floatState;
-        } else if (p.type == "vl53") {
+        } else if (p.type == "vl53l0" || p.type == "vl53l1") {
             obj["distance"] = p.intState;
         } else if (p.type == "ccs811") {
             obj["eco2"] = p.intState;

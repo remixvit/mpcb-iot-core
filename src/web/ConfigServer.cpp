@@ -264,7 +264,8 @@ void ConfigServer::_handleGpio() {
         "{v:'dht22',     l:'DHT22',      max:2},"
         "{v:'ds18b20',   l:'DS18B20',    max:2},"
         "{v:'aht10',     l:'AHT10',      max:2,i2c:1,addrs:[{n:0x38,l:'0x38'},{n:0x39,l:'0x39'}]},"
-        "{v:'vl53',      l:'VL53 ToF',   max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
+        "{v:'vl53l0',    l:'VL53L0X ToF',max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
+        "{v:'vl53l1',    l:'VL53L1X ToF',max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
         "{v:'ccs811',    l:'CCS811 TVOC',max:2,i2c:1,addrs:[{n:0x5A,l:'0x5A (ADDR=GND)'},{n:0x5B,l:'0x5B (ADDR=VCC)'}]},"
         "{v:'pcf_relay', l:'PCF Реле',   max:16,i2c:1,pcf:1,addrs:["
         "{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'},"
@@ -504,14 +505,14 @@ void ConfigServer::_handleGpio() {
         // rules
         "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'}"
         ",{v:'off',l:'выключить'},{v:'pulse',l:'импульс'}];"
-        "const TRIGGER_TYPES=['button','pcf_button','analog','dht22','ds18b20','aht10','vl53','ccs811'];"
+        "const TRIGGER_TYPES=['button','pcf_button','analog','dht22','ds18b20','aht10','vl53l0','vl53l1','ccs811'];"
         "const TARGET_TYPES=['relay','pcf_relay','pwm','neopixel'];"
         "function trigType(key){const it=items.find(x=>(san(x.label)||x.type+'_'+x.pin)===san(key));return it?it.type:'';}"
         "function eventsFor(type){"
         "if(['dht22','aht10'].includes(type))return["
         "{v:'temp_above',l:'темп >'},{v:'temp_below',l:'темп <'},"
         "{v:'hum_above',l:'влажн >'},{v:'hum_below',l:'влажн <'}];"
-        "if(['ds18b20','analog','vl53'].includes(type))return["
+        "if(['ds18b20','analog','vl53l0','vl53l1'].includes(type))return["
         "{v:'above',l:'значение >'},{v:'below',l:'значение <'}];"
         "return[{v:'pressed',l:'нажата'},{v:'released',l:'отпущена'},{v:'any',l:'любое'}];}"
         "let rules=" + rulesJson + ";"
@@ -539,7 +540,7 @@ void ConfigServer::_handleGpio() {
         "const d=document.createElement('div');d.className='rule-item';"
         "const tt=trigType(r.trigger);"
         "const evts=eventsFor(tt);"
-        "const isSensor=['dht22','aht10','ds18b20','analog','vl53'].includes(tt);"
+        "const isSensor=['dht22','aht10','ds18b20','analog','vl53l0','vl53l1'].includes(tt);"
         "if(!evts.find(e=>e.v===r.event))r.event=evts[0].v;"
         "const pmsVis=r.action==='pulse'?'':'display:none';"
         "const thrVis=isSensor?'':'display:none';"
@@ -625,11 +626,11 @@ void ConfigServer::_handleSaveGpio() {
         return;
     }
 
-    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","ccs811","pcf_relay","pcf_button"};
-    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,     1,        16,         16};
-    static const uint8_t tCount    = 11;
-    static const char*   i2cTypes[] = {"aht10","vl53","pcf_relay","pcf_button"};
-    static const uint8_t i2cCount   = 4;
+    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53l0","vl53l1","ccs811","pcf_relay","pcf_button"};
+    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,       1,       1,        16,         16};
+    static const uint8_t tCount    = 13;
+    static const char*   i2cTypes[] = {"aht10","vl53l0","vl53l1","pcf_relay","pcf_button"};
+    static const uint8_t i2cCount   = 5;
     static const uint8_t forbidden[] = {12, 13};
 
     uint8_t cnt[tCount] = {};
@@ -778,7 +779,7 @@ void ConfigServer::_handleDash() {
         "function icon(t){"
         "return{relay:'&#x1F50C;',pcf_relay:'&#x1F50C;',button:'&#x1F518;',pcf_button:'&#x1F518;',"
         "analog:'&#x1F4CA;',pwm:'&#x3030;',neopixel:'&#x1F7E3;',"
-        "dht22:'&#x1F321;',ds18b20:'&#x1F321;',aht10:'&#x1F321;',vl53:'&#x1F4CF;'}[t]||'&#x26AA;';}"
+        "dht22:'&#x1F321;',ds18b20:'&#x1F321;',aht10:'&#x1F321;',vl53l0:'&#x1F4CF;',vl53l1:'&#x1F4CF;'}[t]||'&#x26AA;';}"
         "function val(p){"
         "if(!p.ok)return '<span style=\"color:#ff453a\">нет связи</span>';"
         "if(p.type==='relay'||p.type==='pcf_relay')"
@@ -788,7 +789,7 @@ void ConfigServer::_handleDash() {
         "if(p.type==='aht10'||p.type==='dht22')"
         "return p.temp.toFixed(1)+'&#176;C &nbsp; '+p.humidity.toFixed(1)+'%';"
         "if(p.type==='ds18b20')return p.temp.toFixed(1)+'&#176;C';"
-        "if(p.type==='vl53')return p.distance+' мм';"
+        "if(p.type==='vl53l0'||p.type==='vl53l1')return p.distance+' мм';"
         "if(p.type==='ccs811')return 'CO&#8322; '+p.eco2+' ppm &nbsp; TVOC '+p.tvoc+' ppb';"
         "if(p.type==='analog')return p.converted!==undefined?p.converted.toFixed(2)+' '+(p.unit||''):p.value;"
         "if(p.type==='pwm')return 'duty '+p.duty;"
