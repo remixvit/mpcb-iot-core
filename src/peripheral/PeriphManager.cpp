@@ -221,12 +221,31 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 #if defined(MPCB_HAS_VL53L1X) || defined(MPCB_HAS_VL53L0X)
         {
             uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
-            // Auto-detect chip type by reading register 0xC0:
-            //   VL53L0X → 0xEE,  VL53L1X → 0xEA (L1X uses 16-bit reg addressing,
-            //   but 0xC0 happens to be readable and returns 0xEA on L1X)
-            Wire.beginTransmission(addr); Wire.write(0xC0); Wire.endTransmission(false);
-            Wire.requestFrom(addr, (uint8_t)1);
-            uint8_t modelId = Wire.available() ? Wire.read() : 0x00;
+            // Adafruit_AHTX0::begin() calls Wire.begin() without Wire.end() which on
+            // ESP32-C6 misconfigures the I2C peripheral (timing/config mismatch) while
+            // leaving GPIO mux intact. This silently breaks getSpadInfo() polling in
+            // VL53L0X::init(). Re-init the bus here to restore correct peripheral state.
+            Wire.end();
+            delay(5);
+            Wire.begin(19, 18);
+            delay(20);
+
+            // VL53L0X soft reset: after ESP.restart() device stays mid-measurement.
+            // Reg 0xBF = SOFT_RESET_GO2_SOFT_RESET_N (safe NOP for L1X at 16-bit addr 0xBF00).
+            Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x00); Wire.endTransmission();
+            delay(5);
+            Wire.beginTransmission(addr); Wire.write(0xBF); Wire.write(0x01); Wire.endTransmission();
+            delay(100);
+
+            // Auto-detect chip type by reading model ID register 0xC0:
+            //   VL53L0X → 0xEE,  VL53L1X → 0xEA
+            uint8_t modelId = 0x00;
+            for (uint8_t r = 0; r < 5 && modelId == 0x00; r++) {
+                if (r > 0) delay(20);
+                Wire.beginTransmission(addr); Wire.write(0xC0); Wire.endTransmission(false);
+                Wire.requestFrom(addr, (uint8_t)1);
+                modelId = Wire.available() ? Wire.read() : 0x00;
+            }
             Log.log("Periph", "vl53 detect: modelId=0x" + String(modelId, HEX));
 
 #if defined(MPCB_HAS_VL53L1X)
@@ -258,20 +277,105 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 #endif
 #if defined(MPCB_HAS_VL53L0X)
             if (modelId == 0xEE) {
-                // VL53L0X — Pololu library (no Wire.begin() inside, no revision check)
                 VL53L0X* l0x = new VL53L0X();
                 l0x->setBus(&Wire);
                 l0x->setTimeout(500);
-                bool l0xOk = false;
-                for (uint8_t r = 0; r < 5 && !l0xOk; r++) { delay(100); l0xOk = l0x->init(); }
+                bool l0xOk = l0x->init();
                 if (l0xOk) {
                     l0x->setMeasurementTimingBudget(50000);
+                    Log.log("Periph", "vl53 L0X init OK");
+                } else {
+                    // getSpadInfo() hangs after soft reset: 0xBF only resets Go2 CPU,
+                    // NOT the SPAD/NVM analog hardware (stays stuck mid-measurement).
+                    // DataInit DID run before getSpadInfo failed, so stop_variable is set.
+                    // Complete StaticInit + RefCalibration via public writeReg/readReg API.
+                    Log.log("Periph", "vl53 L0X warmStart");
+
+                    // getSpadInfo() timed out at the poll loop (line 895 in VL53L0X.cpp)
+                    // without executing its cleanup (lines 905-912). Restore register state:
+                    // on page 0xFF=0x07: clear 0x81; switch to 0x06: clear bit2 of 0x83;
+                    // switch to 0x01: set 0x00=0x01; back to page 0x00; clear 0x80.
+                    l0x->writeReg(0x81, 0x00);
+                    l0x->writeReg(0xFF, 0x06);
+                    l0x->writeReg(0x83, l0x->readReg(0x83) & ~0x04);
+                    l0x->writeReg(0xFF, 0x01);
+                    l0x->writeReg(0x00, 0x01);
+                    l0x->writeReg(0xFF, 0x00);
+                    l0x->writeReg(0x80, 0x00);
+
+                    // setReferenceSPADs (hardcode 12 non-aperture = typical VL53L0X)
+                    uint8_t ref_spad_map[6];
+                    l0x->readMulti(VL53L0X::GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
+                    l0x->writeReg(0xFF, 0x01);
+                    l0x->writeReg(VL53L0X::DYNAMIC_SPAD_REF_EN_START_OFFSET, 0x00);
+                    l0x->writeReg(VL53L0X::DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD, 0x2C);
+                    l0x->writeReg(0xFF, 0x00);
+                    l0x->writeReg(VL53L0X::GLOBAL_CONFIG_REF_EN_START_SELECT, 0xB4);
+                    uint8_t spads_enabled = 0;
+                    for (uint8_t i = 0; i < 48; i++) {
+                        if (spads_enabled == 12) { ref_spad_map[i/8] &= ~(1 << (i%8)); }
+                        else if ((ref_spad_map[i/8] >> (i%8)) & 0x1) { spads_enabled++; }
+                    }
+                    l0x->writeMulti(VL53L0X::GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
+
+                    // load tuning settings (DefaultTuningSettings from vl53l0x_tuning.h)
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x00,0x00);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x09,0x00); l0x->writeReg(0x10,0x00); l0x->writeReg(0x11,0x00);
+                    l0x->writeReg(0x24,0x01); l0x->writeReg(0x25,0xFF); l0x->writeReg(0x75,0x00);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x4E,0x2C); l0x->writeReg(0x48,0x00); l0x->writeReg(0x30,0x20);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x30,0x09); l0x->writeReg(0x54,0x00); l0x->writeReg(0x31,0x04);
+                    l0x->writeReg(0x32,0x03); l0x->writeReg(0x40,0x83); l0x->writeReg(0x46,0x25); l0x->writeReg(0x60,0x00);
+                    l0x->writeReg(0x27,0x00); l0x->writeReg(0x50,0x06); l0x->writeReg(0x51,0x00); l0x->writeReg(0x52,0x96);
+                    l0x->writeReg(0x56,0x08); l0x->writeReg(0x57,0x30); l0x->writeReg(0x61,0x00); l0x->writeReg(0x62,0x00);
+                    l0x->writeReg(0x64,0x00); l0x->writeReg(0x65,0x00); l0x->writeReg(0x66,0xA0);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x22,0x32); l0x->writeReg(0x47,0x14); l0x->writeReg(0x49,0xFF); l0x->writeReg(0x4A,0x00);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x7A,0x0A); l0x->writeReg(0x7B,0x00); l0x->writeReg(0x78,0x21);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x23,0x34); l0x->writeReg(0x42,0x00); l0x->writeReg(0x44,0xFF);
+                    l0x->writeReg(0x45,0x26); l0x->writeReg(0x46,0x05); l0x->writeReg(0x40,0x40); l0x->writeReg(0x0E,0x06);
+                    l0x->writeReg(0x20,0x1A); l0x->writeReg(0x43,0x40);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x34,0x03); l0x->writeReg(0x35,0x44);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x31,0x04); l0x->writeReg(0x4B,0x09); l0x->writeReg(0x4C,0x05); l0x->writeReg(0x4D,0x04);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x44,0x00); l0x->writeReg(0x45,0x20); l0x->writeReg(0x47,0x08);
+                    l0x->writeReg(0x48,0x28); l0x->writeReg(0x67,0x00); l0x->writeReg(0x70,0x04); l0x->writeReg(0x71,0x01);
+                    l0x->writeReg(0x72,0xFE); l0x->writeReg(0x76,0x00); l0x->writeReg(0x77,0x00);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x0D,0x01);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x80,0x01); l0x->writeReg(0x01,0xF8);
+                    l0x->writeReg(0xFF,0x01); l0x->writeReg(0x8E,0x01); l0x->writeReg(0x00,0x01);
+                    l0x->writeReg(0xFF,0x00); l0x->writeReg(0x80,0x00);
+
+                    // GPIO config: interrupt on new sample ready, active low
+                    l0x->writeReg(0x0A, 0x04);
+                    l0x->writeReg(0x84, l0x->readReg(0x84) & ~0x10);
+                    l0x->writeReg(0x0B, 0x01);
+
+                    // disable MSRC/TCC, set timing budget
+                    l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0xE8);
+                    l0x->setMeasurementTimingBudget(50000);
+
+                    // VHV calibration (performSingleRefCalibration(0x40))
+                    l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0x01);
+                    l0x->writeReg(VL53L0X::SYSRANGE_START, 0x41);
+                    { uint32_t t = millis(); while ((l0x->readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) == 0 && millis()-t < 500); }
+                    l0x->writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 0x01);
+                    l0x->writeReg(VL53L0X::SYSRANGE_START, 0x00);
+
+                    // phase calibration (performSingleRefCalibration(0x00))
+                    l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0x02);
+                    l0x->writeReg(VL53L0X::SYSRANGE_START, 0x01);
+                    { uint32_t t = millis(); while ((l0x->readReg(VL53L0X::RESULT_INTERRUPT_STATUS) & 0x07) == 0 && millis()-t < 500); }
+                    l0x->writeReg(VL53L0X::SYSTEM_INTERRUPT_CLEAR, 0x01);
+                    l0x->writeReg(VL53L0X::SYSRANGE_START, 0x00);
+
+                    l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0xE8);
+                    l0xOk = true;
+                    Log.log("Periph", "vl53 L0X warmStart OK");
+                }
+                if (l0xOk) {
                     l0x->startContinuous(100);
                     p.sensorObj   = l0x;
                     p.floatState2 = 0.0f;
                     p.lastReadMs  = millis();
                     p.initialized = true;
-                    Log.log("Periph", "vl53 L0X init OK");
                 } else {
                     delete l0x;
                     Log.log("Periph", "vl53 L0X init failed");
