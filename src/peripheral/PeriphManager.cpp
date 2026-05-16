@@ -262,8 +262,8 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
                 if (l1xOk) {
                     l1x->setDistanceMode(VL53L1X::Long);
-                    l1x->setMeasurementTimingBudget(50000);
-                    l1x->startContinuous(100);
+                    l1x->setMeasurementTimingBudget(200000);
+                    l1x->startContinuous(200);
                     p.sensorObj   = l1x;
                     p.floatState2 = 1.0f;
                     p.lastReadMs  = millis();
