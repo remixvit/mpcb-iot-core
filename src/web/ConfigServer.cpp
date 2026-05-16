@@ -265,6 +265,7 @@ void ConfigServer::_handleGpio() {
         "{v:'ds18b20',   l:'DS18B20',    max:2},"
         "{v:'aht10',     l:'AHT10',      max:2,i2c:1,addrs:[{n:0x38,l:'0x38'},{n:0x39,l:'0x39'}]},"
         "{v:'vl53',      l:'VL53 ToF',   max:1,i2c:1,addrs:[{n:0x29,l:'0x29'}]},"
+        "{v:'ccs811',    l:'CCS811 TVOC',max:2,i2c:1,addrs:[{n:0x5A,l:'0x5A (ADDR=GND)'},{n:0x5B,l:'0x5B (ADDR=VCC)'}]},"
         "{v:'pcf_relay', l:'PCF Реле',   max:16,i2c:1,pcf:1,addrs:["
         "{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'},"
         "{n:0x24,l:'0x24'},{n:0x25,l:'0x25'},{n:0x26,l:'0x26'},{n:0x27,l:'0x27'}]},"
@@ -470,6 +471,7 @@ void ConfigServer::_handleGpio() {
         "if(d.ok){const h=document.getElementById('reboot_hint');if(h)h.style.display='block';}}); }"
         "function reboot(){if(confirm('Перезагрузить устройство?'))post('/api/reboot',{},()=>{});}"
         "const I2C_NAMES={0x29:'VL53L0X/L1X',0x38:'AHT10/AHT20',0x39:'AHT10/AHT20',"
+        "0x5A:'CCS811 TVOC',0x5B:'CCS811 TVOC',"
         "0x3C:'SSD1306 OLED',0x3D:'SSD1306 OLED',0x48:'ADS1115',0x49:'ADS1115',"
         "0x4A:'ADS1115',0x4B:'ADS1115',0x68:'MPU6050/DS3231',0x69:'MPU6050',"
         "0x76:'BME/BMP280',0x77:'BME/BMP280',0x20:'PCF8574',0x21:'PCF8574',"
@@ -502,7 +504,7 @@ void ConfigServer::_handleGpio() {
         // rules
         "const ACTIONS=[{v:'toggle',l:'переключить'},{v:'on',l:'включить'}"
         ",{v:'off',l:'выключить'},{v:'pulse',l:'импульс'}];"
-        "const TRIGGER_TYPES=['button','pcf_button','analog','dht22','ds18b20','aht10','vl53'];"
+        "const TRIGGER_TYPES=['button','pcf_button','analog','dht22','ds18b20','aht10','vl53','ccs811'];"
         "const TARGET_TYPES=['relay','pcf_relay','pwm','neopixel'];"
         "function trigType(key){const it=items.find(x=>(san(x.label)||x.type+'_'+x.pin)===san(key));return it?it.type:'';}"
         "function eventsFor(type){"
@@ -623,7 +625,7 @@ void ConfigServer::_handleSaveGpio() {
         return;
     }
 
-    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","pcf_relay","pcf_button"};
+    static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53","ccs811","pcf_relay","pcf_button"};
     static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,     1,        16,         16};
     static const uint8_t tCount    = 11;
     static const char*   i2cTypes[] = {"aht10","vl53","pcf_relay","pcf_button"};
@@ -787,6 +789,7 @@ void ConfigServer::_handleDash() {
         "return p.temp.toFixed(1)+'&#176;C &nbsp; '+p.humidity.toFixed(1)+'%';"
         "if(p.type==='ds18b20')return p.temp.toFixed(1)+'&#176;C';"
         "if(p.type==='vl53')return p.distance+' мм';"
+        "if(p.type==='ccs811')return 'CO&#8322; '+p.eco2+' ppm &nbsp; TVOC '+p.tvoc+' ppb';"
         "if(p.type==='analog')return p.converted!==undefined?p.converted.toFixed(2)+' '+(p.unit||''):p.value;"
         "if(p.type==='pwm')return 'duty '+p.duty;"
         "return '?';}"

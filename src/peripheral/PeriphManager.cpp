@@ -62,7 +62,7 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
     JsonArray arrCheck = doc.as<JsonArray>();
     for (JsonObject obj : arrCheck) {
         String t = obj["type"].as<String>();
-        if (t == "aht10" || t == "vl53" || t == "pcf_relay" || t == "pcf_button") {
+        if (t == "aht10" || t == "vl53" || t == "pcf_relay" || t == "pcf_button" || t == "ccs811") {
             // Bus recovery: toggle SCL 9× to release any stuck slave (e.g. VL53 mid-ranging)
             pinMode(19, OUTPUT); pinMode(18, OUTPUT);
             digitalWrite(19, HIGH);
@@ -321,6 +321,24 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         Log.log("Periph", "PCF8574: add 'robtillaart/PCF8574' to lib_deps");
 #endif
 
+    } else if (p.type == "ccs811") {
+        // Native I2C driver — no library, avoids Wire.begin() issues
+        uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x5A;
+        Wire.beginTransmission(addr); Wire.write(0x20); Wire.endTransmission(false);
+        Wire.requestFrom(addr, (uint8_t)1);
+        uint8_t hwId = Wire.available() ? Wire.read() : 0;
+        if (hwId != 0x81) {
+            Log.log("Periph", "ccs811 not found (hwId=0x" + String(hwId, HEX) + ", expected 0x81)");
+        } else {
+            Wire.beginTransmission(addr); Wire.write(0xF4); Wire.endTransmission(); // APP_START
+            delay(2);
+            Wire.beginTransmission(addr); Wire.write(0x01); Wire.write(0x10); Wire.endTransmission(); // MEAS_MODE drive=1 (1s)
+            delay(50);
+            p.lastReadMs = millis();
+            p.initialized = true;
+            Log.log("Periph", "ccs811 init OK at 0x" + String(addr, HEX));
+        }
+
     } else {
         Log.log("Periph", "Unknown type: " + p.type);
     }
@@ -499,6 +517,27 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
                 Log.log("Periph", p.key + " dist=" + String(mm) + "mm");
             }
         }
+    } else if (p.type == "ccs811") {
+        if (now - p.lastReadMs >= 10000) {
+            p.lastReadMs = now;
+            uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x5A;
+            Wire.beginTransmission(addr); Wire.write(0x00); Wire.endTransmission(false);
+            Wire.requestFrom(addr, (uint8_t)1);
+            uint8_t status = Wire.available() ? Wire.read() : 0;
+            if (status & 0x08) { // DATA_RDY
+                Wire.beginTransmission(addr); Wire.write(0x02); Wire.endTransmission(false);
+                Wire.requestFrom(addr, (uint8_t)4);
+                if (Wire.available() >= 4) {
+                    uint16_t eco2 = ((uint16_t)Wire.read() << 8) | Wire.read();
+                    uint16_t tvoc = ((uint16_t)Wire.read() << 8) | Wire.read();
+                    p.intState   = eco2;
+                    p.floatState = (float)tvoc;
+                    _publishState(p);
+                    _checkRulesValue(p.key, (float)eco2, (float)tvoc);
+                    Log.log("Periph", p.key + " eco2=" + String(eco2) + "ppm tvoc=" + String(tvoc) + "ppb");
+                }
+            }
+        }
     }
     // pwm / neopixel: event-driven only, nothing to poll
 }
@@ -512,7 +551,7 @@ void PeriphManager::onMqttConnected() {
         if (!_list[i].initialized) continue;
         // Sensors publish from loop once they have a valid reading
         const String& t = _list[i].type;
-        if (t == "dht22" || t == "ds18b20" || t == "aht10" || t == "vl53") continue;
+        if (t == "dht22" || t == "ds18b20" || t == "aht10" || t == "vl53" || t == "ccs811") continue;
         _publishState(_list[i]);
     }
 }
@@ -757,6 +796,9 @@ void PeriphManager::_publishState(const Peripheral& p) {
     } else if (p.type == "vl53") {
         payload = "{\"distance\":" + String(p.intState) + "}";
 
+    } else if (p.type == "ccs811") {
+        payload = "{\"eco2\":" + String(p.intState) + ",\"tvoc\":" + String((int)p.floatState) + "}";
+
     } else {
         return;
     }
@@ -793,6 +835,9 @@ String PeriphManager::getStateJson() const {
             obj["temp"] = p.floatState;
         } else if (p.type == "vl53") {
             obj["distance"] = p.intState;
+        } else if (p.type == "ccs811") {
+            obj["eco2"] = p.intState;
+            obj["tvoc"] = (int)p.floatState;
         }
     }
     String result;
