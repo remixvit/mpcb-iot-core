@@ -222,7 +222,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
             uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
             // Adafruit_AHTX0::begin() calls Wire.begin() without Wire.end() which on
             // ESP32-C6 misconfigures the I2C peripheral. Re-init here to restore state.
-            Wire.end(); delay(5); Wire.begin(19, 18); delay(20);
+            Wire.end(); delay(5); Wire.begin(19, 18); Wire.setClock(400000); delay(20);
 
 #if defined(MPCB_HAS_VL53L1X)
             if (p.type == "vl53l1") {
@@ -238,8 +238,8 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
                 if (l1xOk) {
                     l1x->setDistanceMode(VL53L1X::Long);
-                    l1x->setMeasurementTimingBudget(200000);
-                    l1x->startContinuous(200);
+                    l1x->setMeasurementTimingBudget(200000); // 200ms — enough signal at 2m+
+                    l1x->startContinuous(210); // Long mode: period >= budget + 9ms
                     p.sensorObj  = l1x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -571,10 +571,8 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 #if defined(MPCB_HAS_VL53L1X)
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
-                if (s->dataReady()) {
-                    mm = s->read(false);
-                    ok = (s->ranging_data.range_status == VL53L1X::RangeValid);
-                }
+                mm = s->read(true);
+                ok = !s->timeoutOccurred() && mm > 0 && mm < 8190;
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
@@ -625,7 +623,7 @@ void PeriphManager::onMqttConnected() {
         if (!_list[i].initialized) continue;
         // Sensors publish from loop once they have a valid reading
         const String& t = _list[i].type;
-        if (t == "dht22" || t == "ds18b20" || t == "aht10" || t == "vl53" || t == "ccs811") continue;
+        if (t == "dht22" || t == "ds18b20" || t == "aht10" || t == "vl53l0" || t == "vl53l1" || t == "ccs811") continue;
         _publishState(_list[i]);
     }
 }
