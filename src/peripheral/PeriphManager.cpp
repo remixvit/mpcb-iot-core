@@ -16,8 +16,8 @@
   #include <Adafruit_AHTX0.h>
   #define MPCB_HAS_AHT
 #endif
-#if __has_include(<Adafruit_VL53L0X.h>)
-  #include <Adafruit_VL53L0X.h>
+#if __has_include(<VL53L0X.h>)
+  #include <VL53L0X.h>
   #define MPCB_HAS_VL53L0X
 #endif
 #if __has_include(<VL53L1X.h>)
@@ -218,81 +218,68 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 #endif
 
     } else if (p.type == "vl53") {
-#if defined(MPCB_HAS_VL53L1X) && defined(MPCB_HAS_VL53L0X)
-        // Both libraries present — try L1X first (newer chip, better range)
-        VL53L1X* l1x = new VL53L1X();
-        l1x->setBus(&Wire);
-        l1x->setTimeout(500);
-        // Soft-reset VL53L1X: needed when sensor was in continuous mode at ESP restart
-        { Wire.beginTransmission(0x29);
-          Wire.write(0x00); Wire.write(0x00);  // SOFT_RESET register
-          Wire.write(0x00);                     // enter reset
-          Wire.endTransmission();
-          delay(2);
-          Wire.beginTransmission(0x29);
-          Wire.write(0x00); Wire.write(0x00);
-          Wire.write(0x01);                     // exit reset
-          Wire.endTransmission();
-          delay(5);
-        }
-        // Retry init up to 10 times, 200ms apart
-        bool l1xOk = false;
-        for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
-        if (l1xOk) {
-            l1x->setDistanceMode(VL53L1X::Long);
-            l1x->setMeasurementTimingBudget(50000);
-            l1x->startContinuous(100);
-            p.sensorObj   = l1x;
-            p.floatState2 = 1.0f;  // 1=L1X, 0=L0X
-            p.lastReadMs  = millis();
-            p.initialized = true;
-            Log.log("Periph", "vl53 L1X at 0x" + String(p.i2cAddr ? p.i2cAddr : 0x29, HEX));
-        } else {
-            delete l1x;
-            Adafruit_VL53L0X* l0x = new Adafruit_VL53L0X();
-            if (l0x->begin(p.i2cAddr ? p.i2cAddr : 0x29, false, &Wire)) {
-                l0x->startRangeContinuous(100);
-                p.sensorObj   = l0x;
-                p.floatState2 = 0.0f;
-                p.lastReadMs  = millis();
-                p.initialized = true;
-                Log.log("Periph", "vl53 L0X at 0x" + String(p.i2cAddr ? p.i2cAddr : 0x29, HEX));
-            } else {
-                delete l0x;
-                Log.log("Periph", "vl53 not found (L1X and L0X both failed)");
+#if defined(MPCB_HAS_VL53L1X) || defined(MPCB_HAS_VL53L0X)
+        {
+            uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
+            // Auto-detect chip type by reading register 0xC0:
+            //   VL53L0X → 0xEE,  VL53L1X → 0xEA (L1X uses 16-bit reg addressing,
+            //   but 0xC0 happens to be readable and returns 0xEA on L1X)
+            Wire.beginTransmission(addr); Wire.write(0xC0); Wire.endTransmission(false);
+            Wire.requestFrom(addr, (uint8_t)1);
+            uint8_t modelId = Wire.available() ? Wire.read() : 0x00;
+            Log.log("Periph", "vl53 detect: modelId=0x" + String(modelId, HEX));
+
+#if defined(MPCB_HAS_VL53L1X)
+            if (modelId == 0xEA) {
+                // VL53L1X — soft reset via register 0x0000
+                Wire.beginTransmission(addr); Wire.write(0x00); Wire.write(0x00); Wire.write(0x00); Wire.endTransmission();
+                delay(2);
+                Wire.beginTransmission(addr); Wire.write(0x00); Wire.write(0x00); Wire.write(0x01); Wire.endTransmission();
+                delay(5);
+                VL53L1X* l1x = new VL53L1X();
+                l1x->setBus(&Wire);
+                l1x->setTimeout(500);
+                bool l1xOk = false;
+                for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
+                if (l1xOk) {
+                    l1x->setDistanceMode(VL53L1X::Long);
+                    l1x->setMeasurementTimingBudget(50000);
+                    l1x->startContinuous(100);
+                    p.sensorObj   = l1x;
+                    p.floatState2 = 1.0f;
+                    p.lastReadMs  = millis();
+                    p.initialized = true;
+                    Log.log("Periph", "vl53 L1X init OK");
+                } else {
+                    delete l1x;
+                    Log.log("Periph", "vl53 L1X init failed");
+                }
             }
-        }
-#elif defined(MPCB_HAS_VL53L1X)
-        VL53L1X* l1x = new VL53L1X();
-        l1x->setBus(&Wire);
-        l1x->setTimeout(500);
-        bool l1xOk = false;
-        for (uint8_t r = 0; r < 5 && !l1xOk; r++) { delay(100); l1xOk = l1x->init(); }
-        if (l1xOk) {
-            l1x->setDistanceMode(VL53L1X::Long);
-            l1x->setMeasurementTimingBudget(50000);
-            l1x->startContinuous(100);
-            p.sensorObj   = l1x;
-            p.floatState2 = 1.0f;
-            p.lastReadMs  = millis();
-            p.initialized = true;
-            Log.log("Periph", "vl53 L1X init OK");
-        } else {
-            delete l1x;
-            Log.log("Periph", "vl53 L1X not found");
-        }
-#elif defined(MPCB_HAS_VL53L0X)
-        Adafruit_VL53L0X* l0x = new Adafruit_VL53L0X();
-        if (l0x->begin(p.i2cAddr ? p.i2cAddr : 0x29, false, &Wire)) {
-            l0x->startRangeContinuous(100);
-            p.sensorObj   = l0x;
-            p.floatState2 = 0.0f;
-            p.lastReadMs  = millis();
-            p.initialized = true;
-            Log.log("Periph", "vl53 L0X init OK");
-        } else {
-            delete l0x;
-            Log.log("Periph", "vl53 L0X not found");
+#endif
+#if defined(MPCB_HAS_VL53L0X)
+            if (modelId == 0xEE) {
+                // VL53L0X — Pololu library (no Wire.begin() inside, no revision check)
+                VL53L0X* l0x = new VL53L0X();
+                l0x->setBus(&Wire);
+                l0x->setTimeout(500);
+                bool l0xOk = false;
+                for (uint8_t r = 0; r < 5 && !l0xOk; r++) { delay(100); l0xOk = l0x->init(); }
+                if (l0xOk) {
+                    l0x->setMeasurementTimingBudget(50000);
+                    l0x->startContinuous(100);
+                    p.sensorObj   = l0x;
+                    p.floatState2 = 0.0f;
+                    p.lastReadMs  = millis();
+                    p.initialized = true;
+                    Log.log("Periph", "vl53 L0X init OK");
+                } else {
+                    delete l0x;
+                    Log.log("Periph", "vl53 L0X init failed");
+                }
+            }
+#endif
+            if (!p.initialized)
+                Log.log("Periph", "vl53 not found (modelId=0x" + String(modelId, HEX) + ")");
         }
 #else
         Log.log("Periph", "vl53: add Adafruit_VL53L0X or VL53L1X to lib_deps");
@@ -500,11 +487,9 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 #endif
 #if defined(MPCB_HAS_VL53L0X)
             if (p.floatState2 < 1.0f) {
-                Adafruit_VL53L0X* s = (Adafruit_VL53L0X*)p.sensorObj;
-                if (s->isRangeComplete()) {
-                    mm = s->readRangeResult();
-                    ok = (mm < 8190);  // 8190=out-of-range, 0xFFFF=error
-                }
+                VL53L0X* s = (VL53L0X*)p.sensorObj;
+                mm = s->readRangeContinuousMillimeters();
+                ok = !s->timeoutOccurred() && (mm < 8190);
             }
 #endif
             if (ok) {
