@@ -3,6 +3,20 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+#ifndef I2C_SDA
+#  define I2C_SDA 19
+#  define I2C_SCL 18
+#endif
+
+static uint16_t _median5(uint16_t buf[5]) {
+    uint16_t b[5];
+    memcpy(b, buf, sizeof(b));
+    for (uint8_t i = 0; i < 4; i++)
+        for (uint8_t j = 0; j < 4 - i; j++)
+            if (b[j] > b[j+1]) { uint16_t t = b[j]; b[j] = b[j+1]; b[j+1] = t; }
+    return b[2];
+}
+
 #if __has_include(<DHT.h>)
   #include <DHT.h>
   #define MPCB_HAS_DHT
@@ -62,7 +76,7 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
     JsonArray arrCheck = doc.as<JsonArray>();
     for (JsonObject obj : arrCheck) {
         String t = obj["type"].as<String>();
-        if (t == "aht10" || t == "vl53" || t == "pcf_relay" || t == "pcf_button" || t == "ccs811") {
+        if (t == "aht10" || t == "vl53l0" || t == "vl53l1" || t == "pcf_relay" || t == "pcf_button" || t == "ccs811") {
             // Bus recovery: toggle SCL 9× to release any stuck slave (e.g. VL53 mid-ranging)
             pinMode(19, OUTPUT); pinMode(18, OUTPUT);
             digitalWrite(19, HIGH);
@@ -74,9 +88,9 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
             digitalWrite(19, HIGH); delayMicroseconds(5);
             Wire.end();
             delay(20);
-            Wire.begin(19, 18);
+            Wire.begin(I2C_SDA, I2C_SCL);
             delay(50);
-            Log.log("Periph", "I2C init SDA=19 SCL=18");
+            Log.log("Periph", "I2C init SDA=" + String(I2C_SDA) + " SCL=" + String(I2C_SCL));
             break;
         }
     }
@@ -103,6 +117,8 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
         p.calBeta   = obj["calBeta"]   | 3950.0f;
         p.calR25    = obj["calR25"]    | 10000.0f;
         if (!obj["calUnit"].isNull()) p.calUnit = obj["calUnit"].as<String>();
+        p.zoneSet   = obj["zoneSet"]   | 0.0f;
+        p.zoneHyst  = obj["zoneHyst"]  | 0.0f;
 
         p.key        = _sanitize(p.label);
         p.topicState = "mpcb/devices/" + deviceId + "/" + p.key + "/state";
@@ -222,7 +238,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
             uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
             // Adafruit_AHTX0::begin() calls Wire.begin() without Wire.end() which on
             // ESP32-C6 misconfigures the I2C peripheral. Re-init here to restore state.
-            Wire.end(); delay(5); Wire.begin(19, 18); Wire.setClock(400000); delay(20);
+            Wire.end(); delay(5); Wire.begin(I2C_SDA, I2C_SCL); Wire.setClock(400000); delay(20);
 
 #if defined(MPCB_HAS_VL53L1X)
             if (p.type == "vl53l1") {
@@ -237,9 +253,9 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 bool l1xOk = false;
                 for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
                 if (l1xOk) {
-                    l1x->setDistanceMode(VL53L1X::Long);
-                    l1x->setMeasurementTimingBudget(200000); // 200ms — enough signal at 2m+
-                    l1x->startContinuous(210); // Long mode: period >= budget + 9ms
+                    l1x->setDistanceMode(VL53L1X::Medium); // Long даёт SigmaFail в помещении; Medium до 3м, лучше при ambient light
+                    l1x->setMeasurementTimingBudget(200000);
+                    l1x->startContinuous(210);
                     p.sensorObj  = l1x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -583,10 +599,24 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             }
 #endif
             if (ok) {
+                // Median filter N=5
+                p.filterBuf[p.filterIdx] = mm;
+                p.filterIdx = (p.filterIdx + 1) % 5;
+                if (p.filterFill < 5) p.filterFill++;
+                if (p.filterFill == 5) mm = _median5(p.filterBuf);
+
+                // Zone classification (Schmitt trigger via stable median)
+                if (p.zoneSet > 0) {
+                    float lo = p.zoneSet - p.zoneHyst;
+                    float hi = p.zoneSet + p.zoneHyst;
+                    p.zone = ((float)mm < lo) ? 0 : ((float)mm > hi) ? 2 : 1;
+                }
+
                 p.intState = mm;
                 _publishState(p);
-                _checkRulesValue(p.key, (float)mm);
-                Log.log("Periph", p.key + " dist=" + String(mm) + "mm");
+                _checkRulesValue(p.key, (float)mm, (float)p.zone);
+                Log.log("Periph", p.key + " dist=" + String(mm) + "mm" +
+                        (p.zone >= 0 ? " zone=" + String(p.zone) : ""));
             }
         }
     } else if (p.type == "ccs811") {
@@ -617,6 +647,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::onMqttConnected() {
+    if (!_transport) return;
     _transport->subscribe("mpcb/devices/" + _deviceId + "/+/set");
     _publishConfig();
     for (uint8_t i = 0; i < _count; i++) {
@@ -736,6 +767,7 @@ void PeriphManager::_checkRulesValue(const String& triggerKey, float val, float 
         else if (r.event == "below"     || r.event == "temp_below") fire = (val  < r.threshold);
         else if (r.event == "hum_above")                             fire = (val2 > r.threshold);
         else if (r.event == "hum_below")                             fire = (val2 < r.threshold);
+        else if (r.event == "zone_eq")  fire = (val2 >= 0.0f && (int)val2 == (int)r.threshold);
         else continue;
 
         if (fire && r.armed) {
@@ -866,7 +898,13 @@ void PeriphManager::_publishState(const Peripheral& p) {
         payload = buf;
 
     } else if (p.type == "vl53l0" || p.type == "vl53l1") {
-        payload = "{\"distance\":" + String(p.intState) + "}";
+        if (p.zoneSet > 0 && p.zone >= 0) {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "{\"distance\":%d,\"zone\":%d}", p.intState, (int)p.zone);
+            payload = buf;
+        } else {
+            payload = "{\"distance\":" + String(p.intState) + "}";
+        }
 
     } else if (p.type == "ccs811") {
         payload = "{\"eco2\":" + String(p.intState) + ",\"tvoc\":" + String((int)p.floatState) + "}";
@@ -907,6 +945,7 @@ String PeriphManager::getStateJson() const {
             obj["temp"] = p.floatState;
         } else if (p.type == "vl53l0" || p.type == "vl53l1") {
             obj["distance"] = p.intState;
+            if (p.zoneSet > 0 && p.zone >= 0) obj["zone"] = (int)p.zone;
         } else if (p.type == "ccs811") {
             obj["eco2"] = p.intState;
             obj["tvoc"] = (int)p.floatState;

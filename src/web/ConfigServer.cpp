@@ -5,6 +5,13 @@
 #include <Update.h>
 #include "../log/RingLog.h"
 
+#ifndef I2C_SDA
+#  define I2C_SDA 19
+#  define I2C_SCL 18
+#endif
+#define _MPCB_STR(x) #x
+#define MPCB_STR(x)  _MPCB_STR(x)
+
 // ---------------------------------------------------------------------------
 // HTML шаблоны (PROGMEM)
 // ---------------------------------------------------------------------------
@@ -274,8 +281,20 @@ void ConfigServer::_handleGpio() {
         "{n:0x20,l:'0x20'},{n:0x21,l:'0x21'},{n:0x22,l:'0x22'},{n:0x23,l:'0x23'},"
         "{n:0x24,l:'0x24'},{n:0x25,l:'0x25'},{n:0x26,l:'0x26'},{n:0x27,l:'0x27'}]}"
         "];"
+        // f=forbidden, w=warn (JTAG/strapping/onboard HW)
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+        // ESP32-C3 Super Mini — GPIO8=LED(active-low), I2C=4/5
+        "const PINS=["
+        "{n:0,l:'GPIO0 (ADC)'},{n:1,l:'GPIO1 (ADC)'},{n:3,l:'GPIO3 (ADC)'},"
+        "{n:10,l:'GPIO10'},"
+        "{n:2,l:'GPIO2',w:1},"
+        "{n:4,l:'GPIO4 (SDA)',w:1},{n:5,l:'GPIO5 (SCL)',w:1},"
+        "{n:6,l:'GPIO6',w:1},{n:7,l:'GPIO7',w:1},"
+        "{n:8,l:'GPIO8 (LED)',w:1},{n:9,l:'GPIO9 (BOOT)',w:1},"
+        "{n:20,l:'GPIO20 (RX)',w:1},{n:21,l:'GPIO21 (TX)',w:1}"
+        "];"
+#else
         // ESP32-C6 Super Mini (FH4 — embedded flash, GPIO18/19 free)
-        // f=forbidden (USB), w=warn (JTAG/strapping/onboard HW)
         "const PINS=["
         "{n:0,l:'GPIO0 (ADC)'},{n:1,l:'GPIO1 (ADC)'},{n:2,l:'GPIO2 (ADC)'},{n:3,l:'GPIO3 (ADC)'},"
         "{n:4,l:'GPIO4 (ADC)',w:1},{n:5,l:'GPIO5',w:1},"
@@ -288,6 +307,7 @@ void ConfigServer::_handleGpio() {
         "{n:20,l:'GPIO20 (RX)'},{n:21,l:'GPIO21 (TX)'},"
         "{n:22,l:'GPIO22 (SDA alt)',w:1},{n:23,l:'GPIO23 (SCL alt)',w:1}"
         "];"
+#endif
         "function isPcf(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.pcf);}"
         "function isI2C(v){const t=TYPES.find(t=>t.v===v);return !!(t&&t.i2c&&!t.pcf);}"
         "function addrsFor(type){const t=TYPES.find(x=>x.v===type);return(t&&t.addrs)||[];}"
@@ -336,7 +356,7 @@ void ConfigServer::_handleGpio() {
         "let items=" + periphJson + ";"
         "items=items.map(it=>Object.assign({pin:0,i2cAddr:0x38,channel:0,"
         "calMode:0,calRawMin:0,calRawMax:4095,calValMin:0,calValMax:100,"
-        "calRRef:10000,calBeta:3950,calR25:10000,calUnit:''},it));"
+        "calRRef:10000,calBeta:3950,calR25:10000,calUnit:'',zoneSet:0,zoneHyst:0},it));"
         "function typeOpts(idx){"
         "return TYPES.map(t=>{"
         "const oth=items.filter((x,j)=>j!==idx&&x.type===t.v).length;"
@@ -386,7 +406,7 @@ void ConfigServer::_handleGpio() {
         "+`<select style='min-width:80px' onchange='items[${i}].channel=+this.value;render()'>${pcfChannelOpts(i)}</select>`;"
         "}else if(i2c){"
         "pctrl=`<select style='min-width:155px' onchange='items[${i}].i2cAddr=+this.value'>${i2cOpts(i)}</select>`"
-        "+`<span style='font-size:.75rem;color:#8e8e93;white-space:nowrap;background:#1c1c1e;padding:3px 8px;border-radius:6px'>SDA&#x2192;19 &nbsp; SCL&#x2192;18</span>`;"
+        "+`<span style='font-size:.75rem;color:#8e8e93;white-space:nowrap;background:#1c1c1e;padding:3px 8px;border-radius:6px'>SDA&#x2192;" MPCB_STR(I2C_SDA) " &nbsp; SCL&#x2192;" MPCB_STR(I2C_SCL) "</span>`;"
         "}else{"
         "pctrl=`<select style='min-width:155px' onchange='items[${i}].pin=+this.value;render()'>${pinOpts(i)}</select>`;"
         "}"
@@ -415,11 +435,21 @@ void ConfigServer::_handleGpio() {
         "}"
         "calPart+=`</div>`;"
         "}"
+        "let zonePart='';"
+        "if(it.type==='vl53l0'||it.type==='vl53l1'){"
+        "zonePart=`<div style='flex-basis:100%;margin-top:2px;display:flex;flex-wrap:wrap;gap:6px;align-items:center'>`"
+        "+`<span class='rlbl'>ЗОНА</span>`"
+        "+`<input type='number' style='width:82px' placeholder='уст. мм' title='Setpoint мм (0=выкл)' value='${it.zoneSet||0}' onchange='items[${i}].zoneSet=+this.value'>`"
+        "+`<span style='font-size:.75rem;color:#8e8e93'>±</span>`"
+        "+`<input type='number' style='width:70px' placeholder='гист. мм' title='Гистерезис мм' value='${it.zoneHyst||0}' onchange='items[${i}].zoneHyst=+this.value'>`"
+        "+`<span style='font-size:.72rem;color:#555'>мм &nbsp; (0=ближе, 1=зона, 2=дальше)</span>`"
+        "+`</div>`;"
+        "}"
         "d.innerHTML=`<select onchange='onTypeChange(${i},this.value)'>${typeOpts(i)}</select>`"
         "+pctrl"
         "+`<input value='${it.label||''}' placeholder='Название' onchange='items[${i}].label=this.value'>`"
         "+`<button onclick='items.splice(${i},1);render();renderRules()'>&#x2715;</button>`"
-        "+calPart;"
+        "+calPart+zonePart;"
         "l.appendChild(d);});"
         "const gp=items.filter(it=>!isI2C(it.type)&&!isPcf(it.type));"
         "const freePins=PINS.filter(p=>!p.f&&!gp.find(x=>x.pin===p.n)).length;"
@@ -512,8 +542,11 @@ void ConfigServer::_handleGpio() {
         "if(['dht22','aht10'].includes(type))return["
         "{v:'temp_above',l:'темп >'},{v:'temp_below',l:'темп <'},"
         "{v:'hum_above',l:'влажн >'},{v:'hum_below',l:'влажн <'}];"
-        "if(['ds18b20','analog','vl53l0','vl53l1'].includes(type))return["
+        "if(['ds18b20','analog'].includes(type))return["
         "{v:'above',l:'значение >'},{v:'below',l:'значение <'}];"
+        "if(['vl53l0','vl53l1'].includes(type))return["
+        "{v:'above',l:'дистанция >'},{v:'below',l:'дистанция <'},"
+        "{v:'zone_eq',l:'зона ='}];"
         "return[{v:'pressed',l:'нажата'},{v:'released',l:'отпущена'},{v:'any',l:'любое'}];}"
         "let rules=" + rulesJson + ";"
         "rules=rules.map(r=>Object.assign({threshold:0,pulseMs:500},r));"
@@ -627,11 +660,17 @@ void ConfigServer::_handleSaveGpio() {
     }
 
     static const char*   tNames[]  = {"relay","button","analog","pwm","neopixel","dht22","ds18b20","aht10","vl53l0","vl53l1","ccs811","pcf_relay","pcf_button"};
-    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,       1,       1,        16,         16};
+    static const uint8_t tLimits[] = {     8,       8,       4,    4,         2,      2,        2,      2,       1,       1,       1,        16,         16};
     static const uint8_t tCount    = 13;
-    static const char*   i2cTypes[] = {"aht10","vl53l0","vl53l1","pcf_relay","pcf_button"};
-    static const uint8_t i2cCount   = 5;
+    static const char*   i2cTypes[] = {"aht10","vl53l0","vl53l1","pcf_relay","pcf_button","ccs811"};
+    static const uint8_t i2cCount   = 6;
+#ifdef CONFIG_IDF_TARGET_ESP32C3
+    static const uint8_t forbidden[] = {};
+    const bool hasForbidden = false;
+#else
     static const uint8_t forbidden[] = {12, 13};
+    const bool hasForbidden = true;
+#endif
 
     uint8_t cnt[tCount] = {};
     bool    usedPin[24] = {};
@@ -651,11 +690,13 @@ void ConfigServer::_handleSaveGpio() {
 
         if (!isI2C) {
             uint8_t pin = obj["pin"] | 255;
-            for (uint8_t fp : forbidden) {
-                if (pin == fp) {
-                    _server.send(400, "application/json",
-                        "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " запрещён\"}");
-                    return;
+            if (hasForbidden) {
+                for (uint8_t fp : forbidden) {
+                    if (pin == fp) {
+                        _server.send(400, "application/json",
+                            "{\"ok\":false,\"err\":\"GPIO" + String(pin) + " запрещён\"}");
+                        return;
+                    }
                 }
             }
             if (pin < 24) {
@@ -789,7 +830,9 @@ void ConfigServer::_handleDash() {
         "if(p.type==='aht10'||p.type==='dht22')"
         "return p.temp.toFixed(1)+'&#176;C &nbsp; '+p.humidity.toFixed(1)+'%';"
         "if(p.type==='ds18b20')return p.temp.toFixed(1)+'&#176;C';"
-        "if(p.type==='vl53l0'||p.type==='vl53l1')return p.distance+' мм';"
+        "if(p.type==='vl53l0'||p.type==='vl53l1'){"
+        "const zl=['ближе','зона','дальше'];"
+        "return p.distance+' мм'+(p.zone!==undefined?' <span style=\"color:#a855f7;font-size:.82rem\">['+zl[p.zone]+']</span>':'');}"
         "if(p.type==='ccs811')return 'CO&#8322; '+p.eco2+' ppm &nbsp; TVOC '+p.tvoc+' ppb';"
         "if(p.type==='analog')return p.converted!==undefined?p.converted.toFixed(2)+' '+(p.unit||''):p.value;"
         "if(p.type==='pwm')return 'duty '+p.duty;"
@@ -851,13 +894,11 @@ void ConfigServer::_handleI2cScan() {
     int sda = _server.hasArg("sda") ? _server.arg("sda").toInt() : 19;
     int scl = _server.hasArg("scl") ? _server.arg("scl").toInt() : 18;
 
-    // Reinit only if non-default pins requested; PeriphManager already owns Wire on 19/18
-    if (sda != 19 || scl != 18) {
-        Wire.end();
-        delay(50);
-        Wire.begin(sda, scl);
-        delay(50);
-    }
+    Wire.end();
+    delay(20);
+    Wire.begin(sda, scl);
+    Wire.setClock(400000);
+    delay(20);
 
     Wire.beginTransmission(0x38);
     uint8_t probe = Wire.endTransmission();
@@ -880,11 +921,11 @@ void ConfigServer::_handleI2cScan() {
     Log.log("I2C scan sda=" + String(sda) + " scl=" + String(scl) +
             " probe_0x38=" + String(probe) + (first ? " no devices" : " found devices"));
 
-    // Restore default Wire if we changed pins
-    if (sda != 19 || scl != 18) {
+    if (sda != I2C_SDA || scl != I2C_SCL) {
         Wire.end();
-        delay(50);
-        Wire.begin(19, 18);
+        delay(20);
+        Wire.begin(I2C_SDA, I2C_SCL);
+        Wire.setClock(400000);
     }
 
     _server.send(200, "application/json", json);

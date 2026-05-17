@@ -55,6 +55,10 @@ struct Peripheral {
     String  calUnit;               // unit string (e.g. "°C", "%")
     float   calOffset = 0.0f;      // tare offset — subtracted from converted
 
+    // VL53 zone config
+    float   zoneSet  = 0.0f;  // setpoint мм (0 = выключено)
+    float   zoneHyst = 0.0f;  // гистерезис мм
+
     // Runtime state
     bool     boolState   = false;
     int32_t  intState    = 0;
@@ -65,8 +69,14 @@ struct Peripheral {
     uint32_t lastReadMs  = 0;
     uint32_t pulseEndMs  = 0;    // relay: pulse timer; button: debounce timer
     bool     initialized = false;
-    void*    sensorObj   = nullptr;  // DHT*, DallasTemperature*
-    void*    sensorObj2  = nullptr;  // OneWire* (must outlive DallasTemperature)
+    void*    sensorObj   = nullptr;
+    void*    sensorObj2  = nullptr;
+
+    // VL53 median filter + zone state
+    uint16_t filterBuf[5] = {};  // circular buffer for median N=5
+    uint8_t  filterIdx    = 0;
+    uint8_t  filterFill   = 0;   // 0–5, ready when == 5
+    int8_t   zone         = -1;  // -1=нет конфига; 0=near, 1=closed, 2=open
 };
 
 class PeriphManager {
