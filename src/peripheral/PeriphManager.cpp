@@ -609,7 +609,9 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 mm = s->read(true);
-                ok = !s->timeoutOccurred() && mm > 0;
+                VL53L1X::RangeStatus rs = s->ranging_data.range_status;
+                ok = !s->timeoutOccurred() && mm > 0 &&
+                     (rs == VL53L1X::RangeValid || mm >= 8190);
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
