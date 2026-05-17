@@ -253,13 +253,29 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 bool l1xOk = false;
                 for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
                 if (l1xOk) {
-                    l1x->setDistanceMode(VL53L1X::Medium); // Long даёт SigmaFail в помещении; Medium до 3м, лучше при ambient light
+                    l1x->setDistanceMode(VL53L1X::Medium);
                     l1x->setMeasurementTimingBudget(200000);
                     l1x->startContinuous(210);
-                    p.sensorObj  = l1x;
-                    p.lastReadMs = millis();
-                    p.initialized = true;
-                    Log.log("Periph", "vl53l1 init OK");
+                    // Verify startContinuous armed — silently fails after some serial flashes
+                    delay(300);
+                    l1x->setTimeout(1000);
+                    uint16_t verif = l1x->read(true);
+                    if (l1x->timeoutOccurred() || verif == 0) {
+                        // First attempt failed — give sensor extra time and retry once
+                        Log.log("Periph", "vl53l1 verif1 fail=" + String(verif) + " retrying");
+                        delay(500);
+                        verif = l1x->read(true);
+                    }
+                    l1x->setTimeout(500);
+                    if (!l1x->timeoutOccurred() && verif > 0) {
+                        p.sensorObj  = l1x;
+                        p.lastReadMs = millis();
+                        p.initialized = true;
+                        Log.log("Periph", "vl53l1 init OK verif=" + String(verif));
+                    } else {
+                        delete l1x;
+                        Log.log("Periph", "vl53l1 init abandoned (no measurement)");
+                    }
                 } else {
                     delete l1x;
                     Log.log("Periph", "vl53l1 init failed");
@@ -278,7 +294,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 l0x->setTimeout(500);
                 bool l0xOk = l0x->init();
                 if (l0xOk) {
-                    l0x->setMeasurementTimingBudget(50000);
+                    l0x->setMeasurementTimingBudget(200000); // 200ms → ~2m range (50ms дал ~1.2m)
                     Log.log("Periph", "vl53l0 init OK");
                 } else {
                     // getSpadInfo() hangs after soft reset: 0xBF only resets Go2 CPU,
@@ -343,7 +359,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 
                     // timing budget
                     l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0xE8);
-                    l0x->setMeasurementTimingBudget(50000);
+                    l0x->setMeasurementTimingBudget(200000);
 
                     // VHV calibration (performSingleRefCalibration(0x40))
                     l0x->writeReg(VL53L0X::SYSTEM_SEQUENCE_CONFIG, 0x01);
@@ -364,7 +380,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     Log.log("Periph", "vl53l0 warmStart OK");
                 }
                 if (l0xOk) {
-                    l0x->startContinuous(100);
+                    l0x->startContinuous(210); // период ≥ бюджет 200ms
                     p.sensorObj  = l0x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -588,14 +604,16 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 mm = s->read(true);
-                ok = !s->timeoutOccurred() && mm > 0 && mm < 8190;
+                // 8190 = "no target in range" — still valid for zone classification
+                ok = !s->timeoutOccurred() && mm > 0;
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
             if (p.type == "vl53l0") {
                 VL53L0X* s = (VL53L0X*)p.sensorObj;
                 mm = s->readRangeContinuousMillimeters();
-                ok = !s->timeoutOccurred() && (mm < 8190);
+                // 8190 = "no target in range" — still valid for zone classification
+                ok = !s->timeoutOccurred() && mm > 0;
             }
 #endif
             if (ok) {
