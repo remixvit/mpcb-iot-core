@@ -26,10 +26,6 @@ static uint16_t _median5(uint16_t buf[5]) {
   #include <DallasTemperature.h>
   #define MPCB_HAS_DS18B20
 #endif
-#if __has_include(<Adafruit_AHTX0.h>)
-  #include <Adafruit_AHTX0.h>
-  #define MPCB_HAS_AHT
-#endif
 #if __has_include(<VL53L0X.h>)
   #include <VL53L0X.h>
   #define MPCB_HAS_VL53L0X
@@ -78,14 +74,14 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
         String t = obj["type"].as<String>();
         if (t == "aht10" || t == "vl53l0" || t == "vl53l1" || t == "pcf_relay" || t == "pcf_button" || t == "ccs811") {
             // Bus recovery: toggle SCL 9× to release any stuck slave (e.g. VL53 mid-ranging)
-            pinMode(19, OUTPUT); pinMode(18, OUTPUT);
-            digitalWrite(19, HIGH);
+            pinMode(I2C_SDA, OUTPUT); pinMode(I2C_SCL, OUTPUT);
+            digitalWrite(I2C_SDA, HIGH);
             for (int i = 0; i < 9; i++) {
-                digitalWrite(18, LOW); delayMicroseconds(5);
-                digitalWrite(18, HIGH); delayMicroseconds(5);
+                digitalWrite(I2C_SCL, LOW); delayMicroseconds(5);
+                digitalWrite(I2C_SCL, HIGH); delayMicroseconds(5);
             }
-            digitalWrite(19, LOW); delayMicroseconds(5);  // STOP
-            digitalWrite(19, HIGH); delayMicroseconds(5);
+            digitalWrite(I2C_SDA, LOW); delayMicroseconds(5);  // STOP
+            digitalWrite(I2C_SDA, HIGH); delayMicroseconds(5);
             Wire.end();
             delay(20);
             Wire.begin(I2C_SDA, I2C_SCL);
@@ -157,6 +153,16 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
     Log.log("Rules", "Loaded " + String(_rulesCount) + " rule(s)");
 }
 
+// BLE/WiFi init may reconfigure GPIO mux on ESP32-C6 — restore I2C
+void PeriphManager::resetI2C() {
+    Wire.end();
+    delay(20);
+    Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.setClock(400000);
+    delay(20);
+    Log.log("Periph", "I2C reinit SDA=" + String(I2C_SDA) + " SCL=" + String(I2C_SCL));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 void PeriphManager::_initPeriph(Peripheral& p) {
@@ -216,22 +222,55 @@ void PeriphManager::_initPeriph(Peripheral& p) {
 #endif
 
     } else if (p.type == "aht10") {
-#ifdef MPCB_HAS_AHT
         uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x38;
-        Adafruit_AHTX0* aht = new Adafruit_AHTX0();
-        if (aht->begin(&Wire, 0, addr)) {
-            p.sensorObj  = aht;
-            p.lastReadMs = millis() - 29000;  // first read after ~1s
-            p.initialized = true;
-            Log.log("Periph", "aht10 init addr=0x" + String(addr, HEX));
-        } else {
-            delete aht;
-            Log.log("Periph", "aht10 not found at 0x" + String(addr, HEX));
+
+        // Clean I2C before init — previous devices may have corrupted the bus
+        Wire.end();
+        delay(5);
+        Wire.begin(I2C_SDA, I2C_SCL);
+        delay(20);
+
+        // Soft reset
+        Wire.beginTransmission(addr);
+        Wire.write((uint8_t)0xBA);
+        uint8_t err = Wire.endTransmission();
+        if (err) { Log.log("Periph", "aht10 reset NACK"); p.initialized = false; }
+        else {
+            delay(20);
+            // Wait for idle after reset
+            bool busy = true;
+            uint32_t t0 = millis();
+            while (busy && millis() - t0 < 100) {
+                Wire.requestFrom(addr, (uint8_t)1);
+                busy = Wire.available() ? (Wire.read() & 0x80) : true;
+                if (busy) delay(10);
+            }
+
+            // Calibrate
+            Wire.beginTransmission(addr);
+            Wire.write((uint8_t)0xE1);
+            Wire.write((uint8_t)0x08);
+            Wire.write((uint8_t)0x00);
+            Wire.endTransmission();
+            delay(300);  // calibration time
+
+            // Verify calibrated
+            uint8_t status = 0;
+            t0 = millis();
+            busy = true;
+            while (busy && millis() - t0 < 200) {
+                Wire.requestFrom(addr, (uint8_t)1);
+                if (Wire.available()) { status = Wire.read(); busy = status & 0x80; }
+                if (busy) delay(10);
+            }
+            if (status & 0x08) {
+                p.lastReadMs  = millis() - 29000;
+                p.initialized = true;
+                Log.log("Periph", "aht10 init OK addr=0x" + String(addr, HEX));
+            } else {
+                Log.log("Periph", "aht10 cal fail status=0x" + String(status, HEX));
+            }
         }
-#else
-        Log.log("Periph", "aht10: add 'adafruit/Adafruit AHTX0' to lib_deps");
-        p.initialized = false;
-#endif
 
     } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         {
@@ -256,26 +295,10 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     l1x->setDistanceMode(VL53L1X::Long);
                     l1x->setMeasurementTimingBudget(200000);
                     l1x->startContinuous(210);
-                    // Verify startContinuous armed — silently fails after some serial flashes
-                    delay(300);
-                    l1x->setTimeout(1000);
-                    uint16_t verif = l1x->read(true);
-                    if (l1x->timeoutOccurred() || verif == 0) {
-                        // First attempt failed — give sensor extra time and retry once
-                        Log.log("Periph", "vl53l1 verif1 fail=" + String(verif) + " retrying");
-                        delay(500);
-                        verif = l1x->read(true);
-                    }
-                    l1x->setTimeout(500);
-                    if (!l1x->timeoutOccurred() && verif > 0) {
-                        p.sensorObj  = l1x;
-                        p.lastReadMs = millis();
-                        p.initialized = true;
-                        Log.log("Periph", "vl53l1 init OK verif=" + String(verif));
-                    } else {
-                        delete l1x;
-                        Log.log("Periph", "vl53l1 init abandoned (no measurement)");
-                    }
+                    p.sensorObj  = l1x;
+                    p.lastReadMs = millis();
+                    p.initialized = true;
+                    Log.log("Periph", "vl53l1 init OK");
                 } else {
                     delete l1x;
                     Log.log("Periph", "vl53l1 init failed");
@@ -589,59 +612,68 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
         }
 #endif
     } else if (p.type == "aht10") {
-#ifdef MPCB_HAS_AHT
         if (now - p.lastReadMs >= 30000) {
             p.lastReadMs = now;
-            sensors_event_t hum, temp;
-            ((Adafruit_AHTX0*)p.sensorObj)->getEvent(&hum, &temp);
-            p.floatState  = temp.temperature;
-            p.floatState2 = hum.relative_humidity;
+            uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x38;
+
+            // Trigger measurement
+            Wire.beginTransmission(addr);
+            Wire.write((uint8_t)0xAC);
+            Wire.write((uint8_t)0x33);
+            Wire.write((uint8_t)0x00);
+            if (Wire.endTransmission() != 0) {
+                Log.log("Periph", p.key + " trigger NACK");
+                return;
+            }
+
+            // Wait for measurement (max 80ms)
+            uint32_t t0 = millis();
+            while (millis() - t0 < 100) {
+                Wire.requestFrom(addr, (uint8_t)1);
+                if (Wire.available() && !(Wire.read() & 0x80)) break;
+                delay(10);
+            }
+
+            // Read 6 data bytes
+            uint8_t data[6] = {};
+            Wire.requestFrom(addr, (uint8_t)6);
+            for (int i = 0; i < 6 && Wire.available(); i++) data[i] = Wire.read();
+
+            uint32_t h = ((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) | (data[2] >> 4);
+            float humidity = (float)h * 100.0f / 1048576.0f;
+
+            uint32_t t = ((uint32_t)(data[2] & 0x0F) << 16) | ((uint32_t)data[3] << 8) | data[4];
+            float temp = (float)t * 200.0f / 1048576.0f - 50.0f;
+
+            p.floatState  = temp;
+            p.floatState2 = humidity;
             _publishState(p);
             _checkRulesValue(p.key, p.floatState, p.floatState2);
-            Log.log("Periph", p.key + " t=" + String(temp.temperature, 1) + " h=" + String(hum.relative_humidity, 1));
+            Log.log("Periph", p.key + " t=" + String(temp, 1) + " h=" + String(humidity, 1));
         }
-#endif
     } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         if (now - p.lastReadMs >= 500) {
             p.lastReadMs = now;
-            uint16_t mm = 0; bool ok = false;
+            uint16_t mm = 0;
 #if defined(MPCB_HAS_VL53L1X)
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
-                mm = s->read(true);
-                VL53L1X::RangeStatus rs = s->ranging_data.range_status;
-                ok = !s->timeoutOccurred() && mm > 0 &&
-                     (rs == VL53L1X::RangeValid || mm >= 8190);
+                s->read(true);
+                mm = s->ranging_data.range_mm;
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
             if (p.type == "vl53l0") {
                 VL53L0X* s = (VL53L0X*)p.sensorObj;
                 mm = s->readRangeContinuousMillimeters();
-                // 8190 = "no target in range" — still valid for zone classification
-                ok = !s->timeoutOccurred() && mm > 0;
             }
 #endif
-            if (ok) {
-                // Median filter N=5
-                p.filterBuf[p.filterIdx] = mm;
-                p.filterIdx = (p.filterIdx + 1) % 5;
-                if (p.filterFill < 5) p.filterFill++;
-                if (p.filterFill == 5) mm = _median5(p.filterBuf);
-
-                // Zone classification (Schmitt trigger via stable median)
-                if (p.zoneSet > 0) {
-                    float lo = p.zoneSet - p.zoneHyst;
-                    float hi = p.zoneSet + p.zoneHyst;
-                    p.zone = ((float)mm < lo) ? 0 : ((float)mm > hi) ? 2 : 1;
-                }
-
-                p.intState = mm;
-                _publishState(p);
-                _checkRulesValue(p.key, (float)mm, (float)p.zone);
-                Log.log("Periph", p.key + " dist=" + String(mm) + "mm" +
-                        (p.zone >= 0 ? " zone=" + String((int)p.zone) : ""));
-            }
+            p.intState = mm;
+            _publishState(p);
+            _checkRulesValue(p.key, (float)mm, (float)p.zone);
+            static uint8_t vl53LogCnt = 0;
+            if (++vl53LogCnt >= 10) { vl53LogCnt = 0;
+                Log.log("Periph", p.key + " dist=" + String(mm) + "mm"); }
         }
     } else if (p.type == "ccs811") {
         if (now - p.lastReadMs >= 10000) {

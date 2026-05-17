@@ -96,6 +96,9 @@ public:
 
     uint8_t count() const { return _count; }
 
+    // Re-init I2C bus after BLE/WiFi start (call after iot.begin())
+    void resetI2C();
+
     // Returns JSON array of all peripheral states (for dashboard)
     String getStateJson() const;
 
