@@ -294,7 +294,6 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 l0x->setTimeout(500);
                 bool l0xOk = l0x->init();
                 if (l0xOk) {
-                    l0x->setMeasurementTimingBudget(200000); // 200ms → ~2m range (50ms дал ~1.2m)
                     Log.log("Periph", "vl53l0 init OK");
                 } else {
                     // getSpadInfo() hangs after soft reset: 0xBF only resets Go2 CPU,
@@ -380,7 +379,13 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     Log.log("Periph", "vl53l0 warmStart OK");
                 }
                 if (l0xOk) {
-                    l0x->startContinuous(210); // период ≥ бюджет 200ms
+                    // Long Range mode (~2m): lower signal rate threshold + longer VCSEL periods
+                    // VCSEL period changes must come BEFORE setMeasurementTimingBudget
+                    l0x->setSignalRateLimit(0.1f);
+                    l0x->setVcselPulsePeriod(VL53L0X::VcselPeriodPreRange, 18);
+                    l0x->setVcselPulsePeriod(VL53L0X::VcselPeriodFinalRange, 14);
+                    l0x->setMeasurementTimingBudget(200000);
+                    l0x->startContinuous(210);
                     p.sensorObj  = l0x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -604,8 +609,10 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 mm = s->read(true);
-                // 8190 = "no target in range" — still valid for zone classification
-                ok = !s->timeoutOccurred() && mm > 0;
+                VL53L1X::RangeStatus rs = s->ranging_data.range_status;
+                // Allow 8190 (no target) for zone; reject SigmaFail/SignalFail
+                ok = !s->timeoutOccurred() && mm > 0 &&
+                     rs != VL53L1X::SigmaFail && rs != VL53L1X::SignalFail;
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
