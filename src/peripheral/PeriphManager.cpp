@@ -253,7 +253,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 bool l1xOk = false;
                 for (uint8_t r = 0; r < 10 && !l1xOk; r++) { delay(200); l1xOk = l1x->init(); }
                 if (l1xOk) {
-                    l1x->setDistanceMode(VL53L1X::Medium);
+                    l1x->setDistanceMode(VL53L1X::Long);
                     l1x->setMeasurementTimingBudget(200000);
                     l1x->startContinuous(210);
                     // Verify startContinuous armed — silently fails after some serial flashes
@@ -609,10 +609,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 mm = s->read(true);
-                VL53L1X::RangeStatus rs = s->ranging_data.range_status;
-                // Accept only RangeValid + "no target" (8190) for zone classification
-                ok = !s->timeoutOccurred() && mm > 0 &&
-                     (rs == VL53L1X::RangeValid || mm >= 8190);
+                ok = !s->timeoutOccurred() && mm > 0;
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
