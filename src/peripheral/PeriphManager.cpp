@@ -610,9 +610,9 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 mm = s->read(true);
                 VL53L1X::RangeStatus rs = s->ranging_data.range_status;
-                // Allow 8190 (no target) for zone; reject SigmaFail/SignalFail
+                // Accept only RangeValid + "no target" (8190) for zone classification
                 ok = !s->timeoutOccurred() && mm > 0 &&
-                     rs != VL53L1X::SigmaFail && rs != VL53L1X::SignalFail;
+                     (rs == VL53L1X::RangeValid || mm >= 8190);
             }
 #endif
 #if defined(MPCB_HAS_VL53L0X)
