@@ -616,7 +616,7 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
                 _publishState(p);
                 _checkRulesValue(p.key, (float)mm, (float)p.zone);
                 Log.log("Periph", p.key + " dist=" + String(mm) + "mm" +
-                        (p.zone >= 0 ? " zone=" + String(p.zone) : ""));
+                        (p.zone >= 0 ? " zone=" + String((int)p.zone) : ""));
             }
         }
     } else if (p.type == "ccs811") {
