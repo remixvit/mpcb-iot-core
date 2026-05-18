@@ -891,14 +891,16 @@ void ConfigServer::_handleApiCmd() {
 // ---------------------------------------------------------------------------
 
 void ConfigServer::_handleI2cScan() {
-    int sda = _server.hasArg("sda") ? _server.arg("sda").toInt() : 19;
-    int scl = _server.hasArg("scl") ? _server.arg("scl").toInt() : 18;
+    int sda = _server.hasArg("sda") ? _server.arg("sda").toInt() : I2C_SDA;
+    int scl = _server.hasArg("scl") ? _server.arg("scl").toInt() : I2C_SCL;
 
-    Wire.end();
-    delay(20);
-    Wire.begin(sda, scl);
-    Wire.setClock(400000);
-    delay(20);
+    if (sda != I2C_SDA || scl != I2C_SCL) {
+        Wire.end();
+        delay(20);
+        Wire.begin(sda, scl);
+        Wire.setClock(400000);
+        delay(20);
+    }
 
     Wire.beginTransmission(0x38);
     uint8_t probe = Wire.endTransmission();

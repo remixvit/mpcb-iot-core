@@ -85,6 +85,7 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
             Wire.end();
             delay(20);
             Wire.begin(I2C_SDA, I2C_SCL);
+            Wire.setClock(400000);
             delay(50);
             Log.log("Periph", "I2C init SDA=" + String(I2C_SDA) + " SCL=" + String(I2C_SCL));
             break;
@@ -130,6 +131,40 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
     }
 
     Log.log("Periph", "Initialized " + String(_count) + " peripheral(s)");
+
+    // ── Post-init bus recovery + VL53 startContinuous ───────────────────────
+    // VL53 init() may leave SDA stuck (internal I2C timeouts).
+    // Clean the bus once here, then start continuous — no Wire.end() ever in loop().
+    bool hasVl53 = false;
+    for (uint8_t i = 0; i < _count; i++) {
+        if ((_list[i].type == "vl53l0" || _list[i].type == "vl53l1") && _list[i].initialized)
+            { hasVl53 = true; break; }
+    }
+    if (hasVl53) {
+        pinMode(I2C_SDA, OUTPUT); pinMode(I2C_SCL, OUTPUT);
+        digitalWrite(I2C_SDA, HIGH);
+        for (int i = 0; i < 9; i++) {
+            digitalWrite(I2C_SCL, LOW); delayMicroseconds(5);
+            digitalWrite(I2C_SCL, HIGH); delayMicroseconds(5);
+        }
+        digitalWrite(I2C_SDA, LOW); delayMicroseconds(5);
+        digitalWrite(I2C_SDA, HIGH); delayMicroseconds(5);
+        Wire.end(); delay(10);
+        Wire.begin(I2C_SDA, I2C_SCL);
+        Wire.setClock(400000);
+        delay(20);
+        for (uint8_t i = 0; i < _count; i++) {
+            Peripheral& vl = _list[i];
+            if (!vl.initialized || !vl.sensorObj) continue;
+#if defined(MPCB_HAS_VL53L0X)
+            if (vl.type == "vl53l0") { ((VL53L0X*)vl.sensorObj)->startContinuous(35); }
+#endif
+#if defined(MPCB_HAS_VL53L1X)
+            if (vl.type == "vl53l1") { ((VL53L1X*)vl.sensorObj)->startContinuous(210); }
+#endif
+        }
+        Log.log("Periph", "VL53 continuous started");
+    }
 
     // ── Rules ────────────────────────────────────────────────────────────────
     _rulesCount = 0;
@@ -224,12 +259,6 @@ void PeriphManager::_initPeriph(Peripheral& p) {
     } else if (p.type == "aht10") {
         uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x38;
 
-        // Clean I2C before init — previous devices may have corrupted the bus
-        Wire.end();
-        delay(5);
-        Wire.begin(I2C_SDA, I2C_SCL);
-        delay(20);
-
         // Soft reset
         Wire.beginTransmission(addr);
         Wire.write((uint8_t)0xBA);
@@ -275,9 +304,6 @@ void PeriphManager::_initPeriph(Peripheral& p) {
     } else if (p.type == "vl53l0" || p.type == "vl53l1") {
         {
             uint8_t addr = p.i2cAddr ? p.i2cAddr : 0x29;
-            // Adafruit_AHTX0::begin() calls Wire.begin() without Wire.end() which on
-            // ESP32-C6 misconfigures the I2C peripheral. Re-init here to restore state.
-            Wire.end(); delay(5); Wire.begin(I2C_SDA, I2C_SCL); Wire.setClock(400000); delay(20);
 
 #if defined(MPCB_HAS_VL53L1X)
             if (p.type == "vl53l1") {
@@ -294,7 +320,6 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                 if (l1xOk) {
                     l1x->setDistanceMode(VL53L1X::Long);
                     l1x->setMeasurementTimingBudget(200000);
-                    l1x->startContinuous(210);
                     p.sensorObj  = l1x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -402,13 +427,7 @@ void PeriphManager::_initPeriph(Peripheral& p) {
                     Log.log("Periph", "vl53l0 warmStart OK");
                 }
                 if (l0xOk) {
-                    // Long Range mode (~2m): lower signal rate threshold + longer VCSEL periods
-                    // VCSEL period changes must come BEFORE setMeasurementTimingBudget
-                    l0x->setSignalRateLimit(0.1f);
-                    l0x->setVcselPulsePeriod(VL53L0X::VcselPeriodPreRange, 18);
-                    l0x->setVcselPulsePeriod(VL53L0X::VcselPeriodFinalRange, 14);
-                    l0x->setMeasurementTimingBudget(200000);
-                    l0x->startContinuous(210);
+                    l0x->setMeasurementTimingBudget(33000);
                     p.sensorObj  = l0x;
                     p.lastReadMs = millis();
                     p.initialized = true;
@@ -621,8 +640,9 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             Wire.write((uint8_t)0xAC);
             Wire.write((uint8_t)0x33);
             Wire.write((uint8_t)0x00);
-            if (Wire.endTransmission() != 0) {
-                Log.log("Periph", p.key + " trigger NACK");
+            uint8_t txErr = Wire.endTransmission();
+            if (txErr != 0) {
+                Log.log("Periph", p.key + " trigger err=" + String(txErr) + " — retry");
                 return;
             }
 
@@ -639,10 +659,10 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             Wire.requestFrom(addr, (uint8_t)6);
             for (int i = 0; i < 6 && Wire.available(); i++) data[i] = Wire.read();
 
-            uint32_t h = ((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) | (data[2] >> 4);
+            uint32_t h = ((uint32_t)data[1] << 12) | ((uint32_t)data[2] << 4) | (data[3] >> 4);
             float humidity = (float)h * 100.0f / 1048576.0f;
 
-            uint32_t t = ((uint32_t)(data[2] & 0x0F) << 16) | ((uint32_t)data[3] << 8) | data[4];
+            uint32_t t = ((uint32_t)(data[3] & 0x0F) << 16) | ((uint32_t)data[4] << 8) | data[5];
             float temp = (float)t * 200.0f / 1048576.0f - 50.0f;
 
             p.floatState  = temp;
@@ -659,6 +679,14 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l1") {
                 VL53L1X* s = (VL53L1X*)p.sensorObj;
                 s->read(true);
+                if (s->timeoutOccurred() || s->ranging_data.range_mm == 0 || s->ranging_data.range_mm >= 8190) {
+                    static uint8_t vl53ErrCnt = 0;
+                    if (++vl53ErrCnt >= 20) { vl53ErrCnt = 0;
+                        Log.log("Periph", p.key + " invalid mm=" + String(s->ranging_data.range_mm)
+                            + " status=" + String(s->ranging_data.range_status)
+                            + " to=" + String(s->timeoutOccurred())); }
+                    return;
+                }
                 mm = s->ranging_data.range_mm;
             }
 #endif
@@ -666,6 +694,12 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             if (p.type == "vl53l0") {
                 VL53L0X* s = (VL53L0X*)p.sensorObj;
                 mm = s->readRangeContinuousMillimeters();
+                if (s->timeoutOccurred() || mm == 0 || mm >= 8190) {
+                    static uint8_t vl53ErrCnt = 0;
+                    if (++vl53ErrCnt >= 20) { vl53ErrCnt = 0;
+                        Log.log("Periph", p.key + " invalid mm=" + String(mm) + " to=" + String(s->timeoutOccurred())); }
+                    return;
+                }
             }
 #endif
             p.intState = mm;
