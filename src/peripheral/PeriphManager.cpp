@@ -3,6 +3,57 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+// ── NeoPixel effect names ────────────────────────────────────────────────────
+static const char* const NEO_FX_NAMES[] = {
+    "off","static","blink","breathe","rainbow","strobe","sunrise","wipe"
+};
+static NeoFx _neoFxFromStr(const String& s) {
+    for (uint8_t i = 0; i < 8; i++) if (s == NEO_FX_NAMES[i]) return (NeoFx)i;
+    return NeoFx::OFF;
+}
+
+// ── HSV → RGB (for rainbow effect) ──────────────────────────────────────────
+static void _hsv2rgb(uint8_t h, uint8_t s, uint8_t v,
+                     uint8_t& r, uint8_t& g, uint8_t& b) {
+    if (s == 0) { r = g = b = v; return; }
+    uint8_t region = h / 43;
+    uint8_t rem    = (h - region * 43) * 6;
+    uint8_t p = (uint16_t)v * (255 - s) / 255;
+    uint8_t q = (uint16_t)v * (255 - ((uint16_t)s * rem / 255)) / 255;
+    uint8_t t = (uint16_t)v * (255 - ((uint16_t)s * (255 - rem) / 255)) / 255;
+    switch (region) {
+        case 0: r=v; g=t; b=p; break;
+        case 1: r=q; g=v; b=p; break;
+        case 2: r=p; g=v; b=t; break;
+        case 3: r=p; g=q; b=v; break;
+        case 4: r=t; g=p; b=v; break;
+        default: r=v; g=p; b=q; break;
+    }
+}
+
+// ── Sunrise color interpolation (0-255 → warm red → warm white) ─────────────
+static void _sunriseColor(uint8_t step, uint8_t& r, uint8_t& g, uint8_t& b) {
+    // 0-85:   dark red (8,0,0) → orange (255,60,5)
+    // 86-170: orange → warm yellow (255,160,40)
+    // 171-255: warm yellow → warm white (255,230,160)
+    if (step < 86) {
+        float t = step / 85.0f;
+        r = 8   + t * (255 - 8);
+        g =       t * 60;
+        b =       t * 5;
+    } else if (step < 171) {
+        float t = (step - 86) / 84.0f;
+        r = 255;
+        g = 60  + t * (160 - 60);
+        b = 5   + t * (40  - 5);
+    } else {
+        float t = (step - 171) / 84.0f;
+        r = 255;
+        g = 160 + t * (230 - 160);
+        b = 40  + t * (160 - 40);
+    }
+}
+
 #ifndef I2C_SDA
 #  define I2C_SDA 19
 #  define I2C_SCL 18
@@ -116,6 +167,8 @@ void PeriphManager::begin(const String& deviceId, const String& deviceName, Conf
         if (!obj["calUnit"].isNull()) p.calUnit = obj["calUnit"].as<String>();
         p.zoneSet   = obj["zoneSet"]   | 0.0f;
         p.zoneHyst  = obj["zoneHyst"]  | 0.0f;
+        p.pixelCount = obj["pixelCount"] | (uint16_t)1;
+        if (p.pixelCount == 0) p.pixelCount = 1;
 
         p.key        = _sanitize(p.label);
         p.topicState = "mpcb/devices/" + deviceId + "/" + p.key + "/state";
@@ -225,8 +278,16 @@ void PeriphManager::_initPeriph(Peripheral& p) {
         p.initialized = true;
 
     } else if (p.type == "neopixel") {
-        Log.log("Periph", "neopixel: subscribe only — control your LED in onMessage()");
-        p.initialized = true;
+        WS2812Strip* strip = new WS2812Strip();
+        if (strip->begin(p.pin, p.pixelCount)) {
+            p.sensorObj   = strip;
+            p.initialized = true;
+            Log.log("Periph", "neopixel init pin=" + String(p.pin) +
+                              " pixels=" + String(p.pixelCount));
+        } else {
+            delete strip;
+            Log.log("Periph", "neopixel init FAIL pin=" + String(p.pin));
+        }
 
     } else if (p.type == "dht22") {
 #ifdef MPCB_HAS_DHT
@@ -731,7 +792,87 @@ void PeriphManager::_loopPeriph(Peripheral& p) {
             }
         }
     }
-    // pwm / neopixel: event-driven only, nothing to poll
+    // pwm: event-driven, nothing to poll
+
+    // ── NeoPixel effects ────────────────────────────────────────────────────
+    if (p.type == "neopixel" && p.initialized && p.sensorObj && p.neoOn) {
+        uint32_t now = millis();
+        if (now < p.neoStepAt) return;
+        WS2812Strip* strip = (WS2812Strip*)p.sensorObj;
+
+        if (p.neoFx == NeoFx::BLINK || p.neoFx == NeoFx::STROBE) {
+            bool lit = (p.neoStep & 1) == 0;
+            if (lit) strip->fill(p.neoR, p.neoG, p.neoB, p.neoBrightness);
+            else     strip->clear();
+            strip->show();
+            p.neoStep ^= 1;
+            // Count one full on+off cycle
+            if (p.neoStep == 0 && p.neoCount != -1) {
+                if (--p.neoCountRem <= 0) {
+                    strip->clear(); strip->show();
+                    p.neoOn = false;
+                    _publishState(p); return;
+                }
+            }
+            p.neoStepAt = now + max((uint32_t)1, p.neoSpeed);
+
+        } else if (p.neoFx == NeoFx::BREATHE) {
+            // step 0-255, direction up/down
+            uint8_t bri = (uint16_t)p.neoStep * p.neoBrightness / 255;
+            strip->fill(p.neoR, p.neoG, p.neoB, bri);
+            strip->show();
+            if (p.neoDir) { if (++p.neoStep == 255) p.neoDir = false; }
+            else           { if (--p.neoStep == 0)   {
+                p.neoDir = true;
+                if (p.neoCount != -1 && --p.neoCountRem <= 0) {
+                    strip->clear(); strip->show();
+                    p.neoOn = false; _publishState(p); return;
+                }
+            }}
+            p.neoStepAt = now + max((uint32_t)1, p.neoSpeed / 512u);
+
+        } else if (p.neoFx == NeoFx::RAINBOW) {
+            uint8_t r, g, b;
+            for (uint16_t i = 0; i < strip->count(); i++) {
+                uint8_t hue = (uint8_t)(p.neoStep + (uint32_t)i * 256 / strip->count());
+                _hsv2rgb(hue, 255, p.neoBrightness, r, g, b);
+                strip->setPixel(i, r, g, b);
+            }
+            strip->show();
+            if (++p.neoStep == 0 && p.neoCount != -1) {
+                if (--p.neoCountRem <= 0) {
+                    strip->clear(); strip->show();
+                    p.neoOn = false; _publishState(p); return;
+                }
+            }
+            p.neoStepAt = now + max((uint32_t)1, p.neoSpeed / 256u);
+
+        } else if (p.neoFx == NeoFx::SUNRISE) {
+            uint8_t r, g, b;
+            _sunriseColor((uint8_t)p.neoStep, r, g, b);
+            uint8_t bri = (uint16_t)p.neoStep * p.neoBrightness / 255;
+            strip->fill(r, g, b, bri);
+            strip->show();
+            if (p.neoStep < 255) {
+                p.neoStep++;
+                p.neoStepAt = now + max((uint32_t)1, p.neoSpeed * 1000u / 255u);
+            } else {
+                // Sunrise complete — hold at warm white static
+                p.neoFx = NeoFx::STATIC;
+                p.neoR = r; p.neoG = g; p.neoB = b;
+                _publishState(p);
+            }
+
+        } else if (p.neoFx == NeoFx::WIPE) {
+            if (p.neoStep < strip->count()) {
+                strip->setPixel(p.neoStep, p.neoR, p.neoG, p.neoB);
+                strip->show();
+                p.neoStep++;
+                p.neoStepAt = now + max((uint32_t)1, p.neoSpeed);
+            }
+            // Hold when done
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -834,13 +975,42 @@ void PeriphManager::_applyCommand(Peripheral& p, const String& payload) {
         }
 
     } else if (p.type == "neopixel") {
-        // Just publish ack — user handles actual LED in their onMqttMessage()
-        if (doc["r"].is<int>()) {
-            p.intState    = doc["r"].as<int>();
-            p.floatState  = doc["g"] | 0;
-            p.floatState2 = doc["b"] | 0;
-            _publishState(p);
+        if (!p.sensorObj) return;
+        WS2812Strip* strip = (WS2812Strip*)p.sensorObj;
+
+        // {"on": false} — explicit off
+        if (doc["on"].is<bool>() && !doc["on"].as<bool>()) {
+            p.neoOn = false; p.neoFx = NeoFx::OFF;
+            strip->clear(); strip->show();
+            _publishState(p); return;
         }
+
+        // Parse common fields, keep existing values if not supplied
+        if (doc["r"].is<int>())          p.neoR          = doc["r"].as<int>();
+        if (doc["g"].is<int>())          p.neoG          = doc["g"].as<int>();
+        if (doc["b"].is<int>())          p.neoB          = doc["b"].as<int>();
+        if (doc["brightness"].is<int>()) p.neoBrightness = doc["brightness"].as<int>();
+        if (doc["speed"].is<int>())      p.neoSpeed      = doc["speed"].as<int>();
+        if (doc["count"].is<int>())      p.neoCount      = doc["count"].as<int>();
+        p.neoCountRem = p.neoCount;
+
+        // Effect
+        NeoFx fx = p.neoFx;
+        if (doc["effect"].is<const char*>()) fx = _neoFxFromStr(doc["effect"].as<String>());
+
+        p.neoFx   = fx;
+        p.neoStep = 0;
+        p.neoDir  = true;
+        p.neoOn   = (fx != NeoFx::OFF);
+
+        if      (fx == NeoFx::OFF)    { strip->clear(); strip->show(); p.neoOn = false; }
+        else if (fx == NeoFx::STATIC) { strip->fill(p.neoR, p.neoG, p.neoB, p.neoBrightness); strip->show(); }
+        else if (fx == NeoFx::BLINK || fx == NeoFx::STROBE)
+            { strip->fill(p.neoR, p.neoG, p.neoB, p.neoBrightness); strip->show(); p.neoStep = 1; }
+        else if (fx == NeoFx::WIPE)   { strip->clear(); strip->show(); }
+
+        p.neoStepAt = millis() + max((uint32_t)1, p.neoSpeed);
+        _publishState(p);
     }
 }
 
@@ -972,9 +1142,13 @@ void PeriphManager::_publishState(const Peripheral& p) {
         payload = "{\"duty\":" + String(p.intState) + "}";
 
     } else if (p.type == "neopixel") {
-        payload = "{\"r\":" + String(p.intState) +
-                  ",\"g\":" + String((int)p.floatState) +
-                  ",\"b\":" + String((int)p.floatState2) + "}";
+        payload = "{\"on\":"         + String(p.neoOn ? "true" : "false") +
+                  ",\"effect\":\""  + NEO_FX_NAMES[(uint8_t)p.neoFx] + "\"" +
+                  ",\"r\":"         + String(p.neoR) +
+                  ",\"g\":"         + String(p.neoG) +
+                  ",\"b\":"         + String(p.neoB) +
+                  ",\"brightness\":" + String(p.neoBrightness) +
+                  ",\"pixels\":"    + String(p.pixelCount) + "}";
 
     } else if (p.type == "dht22" || p.type == "aht10") {
         char buf[64];
@@ -1039,6 +1213,14 @@ String PeriphManager::getStateJson() const {
         } else if (p.type == "ccs811") {
             obj["eco2"] = p.intState;
             obj["tvoc"] = (int)p.floatState;
+        } else if (p.type == "neopixel") {
+            obj["on"]         = p.neoOn;
+            obj["effect"]     = NEO_FX_NAMES[(uint8_t)p.neoFx];
+            obj["r"]          = p.neoR;
+            obj["g"]          = p.neoG;
+            obj["b"]          = p.neoB;
+            obj["brightness"] = p.neoBrightness;
+            obj["pixels"]     = p.pixelCount;
         }
     }
     String result;

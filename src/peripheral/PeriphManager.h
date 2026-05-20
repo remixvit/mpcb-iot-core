@@ -4,16 +4,22 @@
 #include "../ITransport.h"
 #include "../storage/ConfigStorage.h"
 #include "../log/RingLog.h"
+#include "../neopixel/WS2812Strip.h"
 
 // ─── Peripheral types ────────────────────────────────────────────────────────
 // relay    — digital output, ON/OFF via MQTT {"on": bool}
 // button   — digital input pullup, publishes {"pressed": bool} on edge
 // analog   — ADC input, publishes {"value": int, "voltage": float} every 10s
 // pwm      — PWM output, {"duty": 0-255} via MQTT
-// neopixel — WS2812 LED, {"r":0,"g":255,"b":0} via MQTT (needs Adafruit NeoPixel)
+// neopixel — WS2812 strip, built-in RMT driver, effect engine, no external lib
 // dht22    — temp+humidity sensor (needs DHT library), publishes every 30s
 // ds18b20  — temp sensor (needs DallasTemperature), publishes every 30s
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Neopixel built-in effects
+enum class NeoFx : uint8_t {
+    OFF = 0, STATIC, BLINK, BREATHE, RAINBOW, STROBE, SUNRISE, WIPE
+};
 
 static constexpr uint8_t MAX_PERIPHERALS = 24;
 static constexpr uint8_t MAX_RULES       = 20;
@@ -58,6 +64,21 @@ struct Peripheral {
     // VL53 zone config
     float   zoneSet  = 0.0f;  // setpoint мм (0 = выключено)
     float   zoneHyst = 0.0f;  // гистерезис мм
+
+    // NeoPixel config + effect state
+    uint16_t pixelCount    = 1;          // LEDs in strip
+    NeoFx    neoFx         = NeoFx::OFF;
+    uint8_t  neoR          = 255;
+    uint8_t  neoG          = 255;
+    uint8_t  neoB          = 255;
+    uint8_t  neoBrightness = 200;
+    uint32_t neoSpeed      = 500;   // ms — meaning per-effect (see PeriphManager.cpp)
+    int32_t  neoCount      = -1;    // repeat count (-1 = forever)
+    int32_t  neoCountRem   = -1;    // working counter
+    uint16_t neoStep       = 0;     // animation step
+    bool     neoDir        = true;  // direction for breathe
+    bool     neoOn         = false;
+    uint32_t neoStepAt     = 0;     // millis() for next step
 
     // Runtime state
     bool     boolState   = false;
