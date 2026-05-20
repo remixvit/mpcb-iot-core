@@ -113,26 +113,33 @@ window.onload=loadNetworks;
 APPortal::APPortal(const String& apName) : _apName(apName) {}
 
 void APPortal::begin() {
-    // ── Scan BEFORE starting AP — ESP32-C6 can't scan in pure AP mode ──
-    WiFi.mode(WIFI_STA);
-    delay(200);
-    int n = WiFi.scanNetworks();
-    String json = "[";
-    for (int i = 0; i < n; i++) {
-        if (i) json += ",";
-        json += "{\"ssid\":\"" + WiFi.SSID(i) + "\","
-                "\"rssi\":"   + WiFi.RSSI(i) + ","
-                "\"enc\":"    + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+    if (_cachedScan == "[]" || _cachedScan.isEmpty()) {
+        // ── Scan BEFORE starting AP — C6 can't scan in pure AP mode ──
+        WiFi.mode(WIFI_STA);
+        delay(200);
+        int n = WiFi.scanNetworks();
+        String json = "[";
+        for (int i = 0; i < n; i++) {
+            if (i) json += ",";
+            json += "{\"ssid\":\"" + WiFi.SSID(i) + "\","
+                    "\"rssi\":"   + WiFi.RSSI(i) + ","
+                    "\"enc\":"    + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+        }
+        json += "]";
+        WiFi.scanDelete();
+        _cachedScan = json;
+        Serial.println("[AP] Pre-scan: " + String(n) + " networks");
+    } else {
+        Serial.println("[AP] Using pre-cached scan");
     }
-    json += "]";
-    WiFi.scanDelete();
-    _cachedScan = json;
-    Serial.println("[AP] Pre-scan: " + String(n) + " networks");
 
-    // ── Start AP ──
+    // ── Start AP — full mode reset for reliable startup (esp. C3 after BLE init) ──
+    WiFi.mode(WIFI_OFF);
+    delay(100);
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(_apName.c_str());
-    Serial.println("[AP] Started: " + _apName + " @ " + WiFi.softAPIP().toString());
+    delay(100);
+    bool ok = WiFi.softAP(_apName.c_str());
+    Serial.println("[AP] softAP " + String(ok ? "OK" : "FAIL") + ": " + _apName + " @ " + WiFi.softAPIP().toString());
 
     _dns.start(53, "*", WiFi.softAPIP());
 

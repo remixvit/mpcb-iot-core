@@ -72,7 +72,7 @@ void ConfigStorage::saveDevice(const DeviceConfig& cfg) {
 }
 
 String ConfigStorage::loadPeripherals() {
-    _prefs.begin("periph", true);
+    _prefs.begin("periph", false);
     String json = _prefs.getString("cfg", "[]");
     _prefs.end();
     return json;
@@ -85,7 +85,7 @@ void ConfigStorage::savePeripherals(const String& json) {
 }
 
 String ConfigStorage::loadRules() {
-    _prefs.begin("rules", true);
+    _prefs.begin("rules", false);
     String json = _prefs.getString("cfg", "[]");
     _prefs.end();
     return json;
@@ -98,7 +98,7 @@ void ConfigStorage::saveRules(const String& json) {
 }
 
 float ConfigStorage::loadCalOffset(const String& key) {
-    _prefs.begin("poffsets", true);
+    _prefs.begin("poffsets", false);
     float v = _prefs.getFloat(key.substring(0, 14).c_str(), 0.0f);
     _prefs.end();
     return v;

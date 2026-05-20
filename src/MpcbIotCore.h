@@ -74,6 +74,7 @@ private:
 
     IotState      _state = IotState::BOOTING;
     String        _apName;
+    String        _preScanJson;
     uint32_t      _mqttReconnectAt = 0;
     uint32_t      _bleStatusAt     = 0;
     bool          _wifiScanPending   = false;

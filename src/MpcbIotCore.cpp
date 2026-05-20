@@ -26,6 +26,25 @@ void MpcbIotCore::begin(const String& deviceName) {
     Log.log("IoT", "Device: " + dev.deviceName + " (" + dev.deviceId + ")");
     Log.log("IoT", "MAC: " + WiFi.macAddress());
 
+    // ── Pre-scan before BLE — avoids STA→AP mode-switch issues on C3 ─────────
+    // When no WiFi is saved, we'll need the AP portal. Scanning now (before BLE
+    // starts sharing the radio) ensures softAP() gets a clean mode transition.
+    if (!_storage.hasWifi()) {
+        delay(100);
+        int n = WiFi.scanNetworks();
+        String scanJson = "[";
+        for (int i = 0; i < n; i++) {
+            if (i) scanJson += ",";
+            scanJson += "{\"ssid\":\"" + WiFi.SSID(i) + "\","
+                       "\"rssi\":"    + WiFi.RSSI(i) + ","
+                       "\"enc\":"     + (WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? "true" : "false") + "}";
+        }
+        scanJson += "]";
+        WiFi.scanDelete();
+        _preScanJson = scanJson;
+        Log.log("IoT", "Pre-scan: " + String(n) + " networks");
+    }
+
     // ── BLE — запускается всегда, независимо от WiFi ─────────────────────────
     _ble.begin(_apName.c_str(),
         [this](const String& json) { _handleBleCommand(json); },
@@ -129,8 +148,8 @@ void MpcbIotCore::_setState(IotState s) {
 }
 
 void MpcbIotCore::_startAP() {
-    WiFi.mode(WIFI_AP);
     _portal = new APPortal(_apName);
+    if (!_preScanJson.isEmpty()) _portal->setCachedScan(_preScanJson);
     _portal->onConnect([this](const String& ssid, const String& pass) {
         _storage.saveWifi(ssid, pass);
         Log.log("IoT", "WiFi saved: " + ssid + ". Waiting for STA connection...");
@@ -152,6 +171,7 @@ void MpcbIotCore::_closeAP() {
 
 void MpcbIotCore::_startConfigServer() {
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // Disable modem sleep — keeps TCP responsive for web server
     Log.log("IoT", "WiFi connected, IP: " + WiFi.localIP().toString());
 
     // mDNS: device accessible at http://mpcb-XXXX.local

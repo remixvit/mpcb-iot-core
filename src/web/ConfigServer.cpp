@@ -610,7 +610,39 @@ void ConfigServer::_handleGpio() {
         "renderRules();"
         "</script>";
 
-    _server.send(200, "text/html", _page("GPIO", "gpio", body));
+    // Stream response with chunked transfer — never assemble a full ~23 KB page
+    // string. Sending header/body/footer separately keeps peak heap ~17 KB.
+    _server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    _server.send(200, "text/html", "");
+
+    String hdr = "<!DOCTYPE html><html lang='ru'><head>"
+        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>mpcb-iot \xe2\x80\x94 GPIO</title><style>" + String(FPSTR(CONFIG_CSS)) + "</style></head>"
+        "<body><div class='wrap'><h1>&#x2699; mpcb-iot Config</h1>"
+        "<nav>"
+        "<a href='/'>&#x2302; \xd0\xa3\xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xb9\xd1\x81\xd1\x82\xd0\xb2\xd0\xbe</a>"
+        "<a href='/wifi'>&#x1F4F6; WiFi</a>"
+        "<a href='/mqtt'>&#x1F4E1; MQTT</a>"
+        "<a href='/dash'>&#x1F4CA; \xd0\xa1\xd1\x82\xd0\xb0\xd1\x82\xd1\x83\xd1\x81</a>"
+        "<a href='/gpio' class='active'>&#x26A1; GPIO</a>"
+        "<a href='/logs'>&#x1F4CB; \xd0\x9b\xd0\xbe\xd0\xb3\xd0\xb8</a>"
+        "<a href='/ota'>&#x1F4E6; OTA</a>"
+        "</nav>";
+    _server.sendContent(hdr);
+    hdr = String();
+
+    const char* ptr = body.c_str();
+    size_t rem = body.length();
+    while (rem > 0) {
+        size_t chunk = rem < 2048 ? rem : 2048;
+        _server.sendContent(ptr, chunk);
+        ptr += chunk;
+        rem -= chunk;
+    }
+
+    _server.sendContent("</div><div id='toast'></div><script>" +
+                        String(FPSTR(CONFIG_JS)) + "</script></body></html>");
+    _server.sendContent("", 0);
 }
 
 // ---------------------------------------------------------------------------

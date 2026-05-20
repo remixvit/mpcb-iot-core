@@ -19,6 +19,7 @@ public:
 
     void onConnect(ConnectCallback cb) { _onConnect = cb; }
     void onClose(CloseCallback cb)     { _onClose = cb; }
+    void setCachedScan(const String& json) { _cachedScan = json; }
 
     bool isStaConnected() const { return _staConnected; }
     String staIP()        const { return _staIP; }
