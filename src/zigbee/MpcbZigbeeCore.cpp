@@ -94,6 +94,16 @@ void MpcbZigbeeCore::_createEndpoints() {
     for (JsonObject p : doc.as<JsonArray>()) {
         String type = p["type"].as<String>();
         String key  = p["key"].as<String>();
+        // Web-debug and BLE apps may omit "key" — derive it from label (same as PeriphManager::_sanitize)
+        if (key.isEmpty() || key == "null") {
+            key = p["label"].as<String>();
+            key.toLowerCase();
+            String clean;
+            for (char c : key) {
+                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) clean += c;
+            }
+            key = clean;
+        }
         if (type.isEmpty() || key.isEmpty()) continue;
 
         if (type == "relay" || type == "pcf_relay") {

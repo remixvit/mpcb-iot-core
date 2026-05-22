@@ -103,9 +103,12 @@ private:
     }
 
     struct ServerCb : public NimBLEServerCallbacks {
-        void onConnect(NimBLEServer* s, NimBLEConnInfo&) override {
+        void onConnect(NimBLEServer* s, NimBLEConnInfo& connInfo) override {
             Serial.printf("[BLE] Client connected. Total: %d\n",
                           s->getConnectedCount());
+            // Slow connection interval for 802.15.4 (Zigbee) coexistence:
+            // 80*1.25ms=100ms min, 160*1.25ms=200ms max, 600*10ms=6s timeout
+            s->updateConnParams(connInfo.getConnHandle(), 80, 160, 0, 600);
             NimBLEDevice::getAdvertising()->start();
         }
         void onDisconnect(NimBLEServer* s, NimBLEConnInfo&, int) override {
