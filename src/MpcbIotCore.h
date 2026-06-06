@@ -44,9 +44,13 @@ public:
     bool subscribe(const String& topic) override;
 
     // Accessors
-    IotState     state()   const { return _state; }
-    ConfigStorage& storage()     { return _storage; }
-    MqttConfig   mqttConfig()    { return _storage.loadMqtt(); }
+    IotState      state()   const { return _state; }
+    ConfigStorage& storage()      { return _storage; }
+    MqttConfig    mqttConfig()    { return _storage.loadMqtt(); }
+    ConfigServer* webServer()     { return _configServer; }
+
+    void addWebRoute(const String& path, ConfigServer::RouteHandler cb) { _pendingRoutes.push_back({path, cb}); }
+    void disableConfigServer() { _noConfigServer = true; }
 
 private:
     void _setState(IotState s);
@@ -85,4 +89,6 @@ private:
     ConnectedCallback      _onConnected;
     ConfigServer::StateProvider _dashState;
     ConfigServer::CmdHandler    _dashCmd;
+    std::vector<std::pair<String, ConfigServer::RouteHandler>> _pendingRoutes;
+    bool _noConfigServer = false;
 };

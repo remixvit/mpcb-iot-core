@@ -101,6 +101,8 @@ static String _page(const String& title, const String& activeTab, const String& 
 ConfigServer::ConfigServer(ConfigStorage& storage) : _storage(storage) {}
 
 void ConfigServer::begin() {
+    for (auto& r : _routes) _server.on(r.first, r.second);
+
     _server.on("/",            [this](){ _handleRoot(); });
     _server.on("/wifi",        [this](){ _handleWifi(); });
     _server.on("/mqtt",        [this](){ _handleMqtt(); });

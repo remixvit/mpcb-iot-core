@@ -3,12 +3,14 @@
 #include <WebServer.h>
 #include "../storage/ConfigStorage.h"
 #include <functional>
+#include <vector>
 
 class ConfigServer {
 public:
     using SaveCallback  = std::function<void()>;
     using StateProvider = std::function<String()>;
     using CmdHandler    = std::function<void(const String& key, const String& payload)>;
+    using RouteHandler  = std::function<void()>;
 
     ConfigServer(ConfigStorage& storage);
 
@@ -16,9 +18,11 @@ public:
     void loop();
     void stop();
 
-    void onSave(SaveCallback cb)        { _onSave    = cb; }
+    void onSave(SaveCallback cb)          { _onSave       = cb; }
     void onStateRequest(StateProvider cb) { _stateProvider = cb; }
-    void onCmd(CmdHandler cb)           { _cmdHandler = cb; }
+    void onCmd(CmdHandler cb)             { _cmdHandler    = cb; }
+    void addRoute(const String& path, RouteHandler cb) { _routes.push_back({path, cb}); }
+    void send(int code, const String& type, const String& body) { _server.send(code, type, body); }
 
 private:
     void _handleRoot();
@@ -45,4 +49,5 @@ private:
     SaveCallback   _onSave;
     StateProvider  _stateProvider;
     CmdHandler     _cmdHandler;
+    std::vector<std::pair<String, RouteHandler>> _routes;
 };
