@@ -8,8 +8,10 @@
 #include "web/ConfigServer.h"
 #include "log/RingLog.h"
 #include "peripheral/PeriphManager.h"
+#ifdef MPCB_USE_BLE
 #include "ble/BleConfig.h"
 #include "ble/BleOta.h"
+#endif
 
 #define MPCB_FIRMWARE_VERSION "1.0.0"
 
@@ -59,15 +61,19 @@ private:
     void _startConfigServer();
     void _connectMqtt();
     void _mqttLoop();
+#ifdef MPCB_USE_BLE
     void _bleLoop();
     void _handleBleCommand(const String& json);
     String _buildSettingsJson();
     String _buildStatusJson();
+#endif
 
     ConfigStorage _storage;
     WiFiConnect   _wifi;
+#ifdef MPCB_USE_BLE
     BleConfig     _ble;
     BleOta        _bleOta;
+#endif
 
     APPortal*     _portal = nullptr;
     ConfigServer* _configServer = nullptr;
@@ -80,7 +86,9 @@ private:
     String        _apName;
     String        _preScanJson;
     uint32_t      _mqttReconnectAt = 0;
+#ifdef MPCB_USE_BLE
     uint32_t      _bleStatusAt     = 0;
+#endif
     bool          _wifiScanPending   = false;
     bool          _closeApRequested  = false;
 

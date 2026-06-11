@@ -46,11 +46,13 @@ void MpcbIotCore::begin(const String& deviceName) {
     }
 
     // ── BLE — запускается всегда, независимо от WiFi ─────────────────────────
+#ifdef MPCB_USE_BLE
     _ble.begin(_apName.c_str(),
         [this](const String& json) { _handleBleCommand(json); },
         [this](NimBLEServer* server) { _bleOta.createService(server)->start(); }
     );
     _ble.updateSettings(_buildSettingsJson());
+#endif
 
     _setState(IotState::BOOTING);
 
@@ -104,9 +106,12 @@ void MpcbIotCore::loop() {
             break;
     }
 
+#ifdef MPCB_USE_BLE
     _bleLoop();
+#endif
 }
 
+#ifdef MPCB_USE_BLE
 void MpcbIotCore::_bleLoop() {
     _bleOta.loop();
     if (!_ble.connected()) return;
@@ -139,6 +144,7 @@ void MpcbIotCore::_bleLoop() {
         _ble.updateStatus(_buildStatusJson());
     }
 }
+#endif
 
 // ---------------------------------------------------------------------------
 
@@ -291,6 +297,7 @@ bool MpcbIotCore::publish(const String& topic, const String& payload, bool retai
 // BLE helpers
 // ---------------------------------------------------------------------------
 
+#ifdef MPCB_USE_BLE
 String MpcbIotCore::_buildSettingsJson() {
     DeviceConfig dev  = _storage.loadDevice();
     MqttConfig   mqtt = _storage.loadMqtt();
@@ -397,6 +404,7 @@ void MpcbIotCore::_handleBleCommand(const String& json) {
 
     if (needReboot) { delay(500); ESP.restart(); }
 }
+#endif
 
 bool MpcbIotCore::subscribe(const String& topic) {
     if (!_mqttClient) return false;
