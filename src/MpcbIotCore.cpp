@@ -26,6 +26,29 @@ void MpcbIotCore::begin(const String& deviceName) {
     Log.log("IoT", "Device: " + dev.deviceName + " (" + dev.deviceId + ")");
     Log.log("IoT", "MAC: " + WiFi.macAddress());
 
+    // ── Apply compiled-in WiFi/MQTT credentials (from build-agent -D flags) ───
+    // Always overwrite NVS with build-time credentials when provided,
+    // so re-flashing with new WiFi settings takes effect immediately.
+#if defined(WIFI_SSID) && defined(WIFI_PASS)
+    _storage.saveWifi(String(WIFI_SSID), String(WIFI_PASS));
+    Log.log("IoT", "WiFi from build flags: " WIFI_SSID);
+#endif
+#if defined(MQTT_HOST) && defined(MQTT_PORT)
+    {
+        MqttConfig mc = _storage.loadMqtt();
+        mc.host = String(MQTT_HOST);
+        mc.port = MQTT_PORT;
+#if defined(MQTT_USER)
+        mc.user = String(MQTT_USER);
+#endif
+#if defined(MQTT_PASS)
+        mc.password = String(MQTT_PASS);
+#endif
+        _storage.saveMqtt(mc);
+        Log.log("IoT", "MQTT from build flags: " MQTT_HOST);
+    }
+#endif
+
     // ── Pre-scan before BLE — avoids STA→AP mode-switch issues on C3 ─────────
     // When no WiFi is saved, we'll need the AP portal. Scanning now (before BLE
     // starts sharing the radio) ensures softAP() gets a clean mode transition.
